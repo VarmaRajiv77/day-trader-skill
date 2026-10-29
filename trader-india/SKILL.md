@@ -6,21 +6,24 @@ description: >-
   file, runs a pre-market scan of daily closes (20-day breakout, bull flag,
   reclaimed the 20-day average, oversold, oversold bounce) and an opening-range
   breakout scan on 5-minute bars (the 9:15 to 9:30 range), watches one stock
-  for its entry, sets the stop and target to the NSE tick, sizes the trade to
+  for its entry, sets the stop and target to the NSE tick, replays the rest of
+  the session 10,000 times from the stock's own bars (the Time Machine) plus
+  every past day the rule fired, sizes the trade to
   your rupee limits with brokerage and taxes counted, checks it against your
   rules (max loss a trade, a day, and a running total loss limit), and prints
   the order to type into your broker's app (INDmoney, Zerodha, Groww, any).
   Knows NSE hours and the 2026 holidays. Never places an order; paper by
   default. Use when the user says "Indian stocks", "NSE", "BSE", "Nifty",
   "Sensex", "rupees", "INDmoney", "Zerodha", "Groww", "intraday", "scan NSE",
-  "RELIANCE", "TCS", "INFY", "I have 1 lakh", or names any NSE symbol.
+  "RELIANCE", "TCS", "INFY", "I have 1 lakh", "what are the odds" on an
+  Indian stock, or names any NSE symbol.
 ---
 
 # trader-india
 
 The India Desk runs one day trade on NSE from scan to ticket, in rupees. It is
-the same method as the US skills (scanner, entry, exit, budget, risk, broker)
-rebuilt for India: NSE's stock list, NSE's hours (9:15 AM to 3:30 PM IST, no
+the same method as the US skills (scanner, entry, exit, budget, risk, broker),
+plus the Time Machine, rebuilt for India: NSE's stock list, NSE's hours (9:15 AM to 3:30 PM IST, no
 daylight saving) and holidays, the NSE tick, rupee limits, and Indian charges.
 
 It never places an order. It ends with a ticket you type into your broker's
@@ -35,6 +38,7 @@ python3 "${CLAUDE_SKILL_DIR}/india.py" daily --symbols RELIANCE,TCS,INFY,HDFCBAN
 python3 "${CLAUDE_SKILL_DIR}/india.py" orb                            # after 9:35 AM IST: breakouts of the 9:15 to 9:30 range
 python3 "${CLAUDE_SKILL_DIR}/india.py" entry RELIANCE                 # waiting / triggered / expired -> entry.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" plan --stop or-mid --target 2R # -> plan.json
+python3 "${CLAUDE_SKILL_DIR}/india.py" replay                         # the Time Machine: 10,000 replays -> timemachine.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" size                           # -> orders.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" check                          # PASS / BLOCK -> state/risk.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" ticket show                    # the order in plain words
@@ -55,10 +59,12 @@ Everything lives in `trader/india/`, apart from the US files in `trader/`.
 | file | written by | read by |
 | --- | --- | --- |
 | `config.json` | the user (copy `config.example.json`) | every step |
+| `mylist.txt` | the user (copy `nifty50.txt`, the Nifty 50 as of 2026-10-29) | `--watchlist` |
 | `universe.txt` | `universe` | `daily`, `orb` |
 | `watchlist.json` | `daily`, `orb` | `--watchlist` |
 | `entry.json` | `entry` (on a trigger) | `plan` |
-| `plan.json` | `plan` | `size` |
+| `plan.json` | `plan` | `replay`, `size` |
+| `timemachine.json` | `replay` | the user (the odds, the history, the verdict) |
 | `orders.json` | `size` | `check`, `ticket` |
 | `state/risk.json` | `check` | `ticket` (READY only if this exact order passed today) |
 | `state/trades.json` | `ticket placed`, `ticket result` | `check`, `status` |
@@ -97,7 +103,11 @@ of the budget a trade.
 2. Before 9:15 AM IST: `india.py daily`. Say how many charts were fetched,
    passed the floors (Rs 50 and 1,00,000 shares by default) and were scanned,
    and the top few by setup. The whole list (about 2,000 EQ stocks, 100
-   requests) takes a minute or two; `--symbols` for the user's own list.
+   requests) takes a minute or two; `--symbols` for the user's own list. A
+   user with no list can start from the Nifty 50:
+   `cp "${CLAUDE_SKILL_DIR}/nifty50.txt" trader/india/mylist.txt`, then
+   `daily --watchlist trader/india/mylist.txt`. The Nifty 50 changes at the end
+   of March and September: check niftyindices.com and edit the file.
 3. After 9:35 AM IST: `india.py orb` (or `orb --watchlist trader/india/watchlist.json`).
 4. The user picks one chart. Never pick for them. `india.py entry SYMBOL`
    until it says TRIGGERED (re-run every few minutes; it reads completed
@@ -106,15 +116,26 @@ of the budget a trade.
    the user asks otherwise (`--stop or-low`, `--stop 2412.50`, `--stop 1.5%`,
    `--target 1.5R`, `--target 2500`). For a stock the user found elsewhere:
    `plan --symbol TCS --entry 4120 --stop 4080 --target 4200`.
-6. `india.py size`. Say which limit decided the size, the estimated charges
+6. `india.py replay`, the Time Machine, before any money is at risk. One
+   request for 60 days of the stock's 5-minute bars, then 10,000 replays of
+   the rest of the session to the flat-by time (3:10 PM), each bar drawn
+   from the stock's own bars at that time of day (seed 19, so anyone can
+   repeat it), plus the same rule re-run on every past full session. Say the
+   odds (target first, stop first, neither), the history and the verdict line
+   as printed, and that it is a simulation, not a prediction. For a plan made
+   with `--entry`, add `--entry-time 10:00`.
+7. `india.py size`. Say which limit decided the size, the estimated charges
    and the max loss at the stop with charges. A refusal is a refusal: never
    raise a limit to fit a trade.
-7. `india.py check`. PASS or BLOCK with each reason.
-8. `india.py ticket show`. Read the ticket to the user. If they want to place
+8. `india.py check`. PASS or BLOCK with each reason.
+9. `india.py ticket show`. Read the ticket to the user. If they want to place
    it, they type it into their broker's app themselves. Only after they say
    they placed that exact order: `ticket placed --yes`. When it ends:
    `ticket result SYMBOL --pnl RUPEES` (after charges, negative for a loss).
-9. `india.py status` any time: trades today, risk used, the running total.
+10. `india.py status` any time: trades today, risk used, the running total.
+11. After every live step, if `/trader-dashboard` is installed, run its
+    `dashboard.py` so the user sees the trade on one card
+    (`trader/dashboard.html`).
 
 ## Data and limits
 

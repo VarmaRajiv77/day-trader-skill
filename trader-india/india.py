@@ -7,6 +7,7 @@
     python3 india.py orb                               # after 9:35 AM IST: opening-range breakouts so far
     python3 india.py entry RELIANCE                    # waiting / triggered / expired -> entry.json
     python3 india.py plan --stop or-mid --target 2R    # stop and target -> plan.json
+    python3 india.py replay                            # the Time Machine -> timemachine.json
     python3 india.py size                              # shares for your rupee limits -> orders.json
     python3 india.py check                             # PASS / BLOCK -> state/risk.json
     python3 india.py ticket show                       # the order to type into your broker's app
@@ -47,6 +48,16 @@ entry     One stock, bar by bar: not open yet / waiting (and how far) /
 plan      Stop: or-mid (default), or-low, a price, or N%. Target: 2R (default),
           NR, or a price. The stop rounds DOWN and the target DOWN to the tick
           (tick_size, 0.05). Refuses a stop at or above the entry.
+replay    The Time Machine. 60 days of 5-minute bars (one request); the pool is
+          every full past session (75 bars, 9:15 to 3:30). Each of 10,000
+          replays walks from the entry bar to the flat-by time, drawing every
+          bar whole from the same time of day (+-2 bars) as ratios to the last
+          close; the stop is checked first in each bar. Then the same rule on
+          every past session. Prints the odds, the history and one verdict:
+          the target's share of the replays that hit a side against the share
+          that breaks even at the target's R (50 % at 1R, 33 % at 2R), under 5
+          points a coin flip / break-even, 5 to 15 leans, 15+ strongly. Needs
+          20 full sessions. Seed 19 by default: same data, same numbers.
 size      Whole shares inside four limits, the smallest wins: max loss per
           trade (the loss at the stop PLUS estimated charges), the position
           cap, the max order and cash after your buffer. No margin.
@@ -71,7 +82,9 @@ import io
 import json
 import math
 import os
+import random
 import re
+import statistics
 import sys
 import time
 import urllib.error
@@ -983,6 +996,203 @@ def check_order(order, cfg, log, now_utc):
     return ("BLOCK" if reasons else "PASS"), reasons, notes
 
 
+# ---------------------------------------------------------------- time machine
+
+SESSION_BARS = 75    # 9:15 to 3:30 PM in 5-minute bars
+MIN_SESSIONS = 20
+COIN_FLIP = 0.05
+STRONG = 0.15
+
+
+def tm_days(series, now_utc):
+    """{date: {slot: bar}} of complete regular-session 5-minute bars, India time."""
+    days = {}
+    for i, ts in enumerate(series["t"]):
+        o, h, l, c = [(series.get(k) or [None] * len(series["t"]))[i] for k in ("o", "h", "l", "c")]
+        if ts is None or None in (o, h, l, c) or int(ts) % 300:
+            continue
+        t = ts_to_ist(ts)
+        mins = t.hour * 60 + t.minute - (OPEN.hour * 60 + OPEN.minute)
+        if mins < 0 or mins >= SESSION_BARS * BAR_MIN:
+            continue
+        if t + datetime.timedelta(minutes=BAR_MIN) > to_ist(now_utc):
+            continue
+        days.setdefault(t.date().isoformat(), {})[mins // BAR_MIN] = {
+            "o": float(o), "h": float(h), "l": float(l), "c": float(c)}
+    return days
+
+
+def full_sessions(days, before):
+    """Full sessions (all 75 bars) strictly before `before`, oldest first."""
+    return [(d, [days[d][i] for i in range(SESSION_BARS)]) for d in sorted(days)
+            if d < before and len(days[d]) == SESSION_BARS]
+
+
+def build_pool(sessions):
+    """pool[i] = every past session's bar i as (o, h, l, c) / bar i-1's close."""
+    pool = [[] for _ in range(SESSION_BARS)]
+    for _, D in sessions:
+        for i in range(1, SESSION_BARS):
+            pc = D[i - 1]["c"]
+            pool[i].append((D[i]["o"] / pc, D[i]["h"] / pc, D[i]["l"] / pc, D[i]["c"] / pc))
+    return pool
+
+
+def pct(a, q):
+    return a[min(len(a) - 1, int(q * len(a)))]
+
+
+def simulate(pool, entry, stop, target, k, last, replays=10000, seed=19, window=2):
+    """Replays of bars k+1..last, each bar drawn whole from the same time of day (+-window
+    bars) in past sessions and scaled to the current price. The stop is checked first in
+    every bar, so a bar that touches both counts as the stop."""
+    risk = entry - stop
+    r_target = round((target - entry) / risk, 4)
+    rng = random.Random(seed)
+    outcomes, closes = [], []
+    for _ in range(replays):
+        p, outcome = entry, None
+        for i in range(k + 1, last + 1):
+            j = i if window == 0 else min(SESSION_BARS - 1, max(1, i + rng.randint(-window, window)))
+            o, h, l, c = rng.choice(pool[j])
+            if outcome is None:
+                if p * l <= stop:
+                    outcome = "stop"
+                elif p * h >= target:
+                    outcome = "target"
+            p *= c
+        outcomes.append(outcome or "close")
+        closes.append(p)
+    n = float(replays)
+    srt = sorted(closes)
+    Rs = [r_target if o == "target" else -1.0 if o == "stop" else (p - entry) / risk
+          for o, p in zip(outcomes, closes)]
+    return {"replays": replays, "seed": seed, "window": window, "bars_left": last - k,
+            "p_target": round(outcomes.count("target") / n, 4), "p_stop": round(outcomes.count("stop") / n, 4),
+            "p_neither": round(outcomes.count("close") / n, 4),
+            "p_green": round(sum(1 for o, p in zip(outcomes, closes)
+                                 if o == "target" or (o == "close" and p > entry)) / n, 4),
+            "median_close": round(pct(srt, 0.5), 2), "p5_close": round(pct(srt, 0.05), 2),
+            "p95_close": round(pct(srt, 0.95), 2), "avg_R": round(statistics.mean(Rs), 3), "r_at_target": r_target}
+
+
+def history_replay(sessions, rule, last, tick):
+    """The plan's opening-range rule on every past full session: entry = the first bar after
+    the range to close above it (up to the last bar), then stop first, then target."""
+    n = rule["or_minutes"] // BAR_MIN
+    trades = []
+    for d, D in sessions:
+        oh, ol = max(b["h"] for b in D[:n]), min(b["l"] for b in D[:n])
+        kk = next((i for i in range(n, last + 1) if D[i]["c"] > oh), None)
+        if kk is None:
+            continue
+        e = round(D[kk]["c"], 2)
+        raw = (oh + ol) / 2 if rule["stop_rule"] == "or-mid" else ol if rule["stop_rule"] == "or-low" \
+            else e * (1 - rule["stop_pct"] / 100.0)
+        st = to_tick(raw, tick)
+        risk = e - st
+        if risk <= 0:
+            continue
+        tg = to_tick(e + rule["target_r"] * risk, tick)
+        oc = None
+        for b in D[kk + 1:last + 1]:
+            if b["l"] <= st:
+                oc = "stop"
+                break
+            if b["h"] >= tg:
+                oc = "target"
+                break
+        R = (tg - e) / risk if oc == "target" else -1.0 if oc == "stop" else (D[last]["c"] - e) / risk
+        trades.append({"date": d, "entry": e, "stop": st, "target": tg, "outcome": oc or "close", "R": round(R, 2)})
+    return {"sessions": len(sessions), "triggered": len(trades),
+            "target": sum(1 for x in trades if x["outcome"] == "target"),
+            "stop": sum(1 for x in trades if x["outcome"] == "stop"),
+            "close": sum(1 for x in trades if x["outcome"] == "close"),
+            "avg_R": round(statistics.mean(x["R"] for x in trades), 3) if trades else None,
+            "rule": rule, "trades": trades}
+
+
+def verdict(mc, until_label):
+    """Compares the target's share of the replays that hit a side with the share that breaks
+    even at the target's R (50 % at 1R, 33 % at 2R)."""
+    pt, ps = mc["p_target"], mc["p_stop"]
+    if pt + ps <= 0:
+        return "No replay reached the target or the stop by %s: the price then decides every one." % until_label
+    r = mc["r_at_target"] or 1.0
+    share, even = pt / (pt + ps), 1.0 / (1.0 + r)
+    d = share - even
+    one_r = abs(r - 1.0) < 0.005
+    if abs(d) < COIN_FLIP:
+        head = "Close to a coin flip" if one_r else "Close to break-even"
+    elif abs(d) < STRONG:
+        head = "Leans toward the target" if d > 0 else "Leans toward the stop"
+    else:
+        head = "Strongly toward the target" if d > 0 else "Strongly toward the stop"
+    odds = "target first %.1f %% vs stop first %.1f %%" % (100 * pt, 100 * ps)
+    if one_r:
+        return "%s: %s." % (head, odds)
+    return ("%s: at %gR the target has to come first in %.0f %% of the replays that hit one side; it did in "
+            "%.0f %% (%s)." % (head, round(r, 2), 100 * even, 100 * share, odds))
+
+
+def bar_of(clock):
+    """'9:40 AM' (a bar's close time) -> the bar's index from 9:15."""
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*(AM|PM)?\s*$", str(clock or ""), re.I)
+    if not m:
+        raise IndiaError("an entry time wants a form like 9:40 AM or 09:40")
+    h, mi = int(m.group(1)), int(m.group(2))
+    if m.group(3):
+        h = h % 12 + (12 if m.group(3).upper() == "PM" else 0)
+    k = (h * 60 + mi - (OPEN.hour * 60 + OPEN.minute)) // BAR_MIN - 1
+    if not 0 <= k < SESSION_BARS:
+        raise IndiaError("the entry time %s is outside the 9:15 AM to 3:30 PM session" % clock)
+    return k
+
+
+def time_machine(series, plan, now_utc, replays=10000, seed=19, window=2, until=None):
+    if not 1 <= replays <= 1000000:
+        raise IndiaError("--replays must be between 1 and 1,000,000")
+    if not 0 <= window <= 10:
+        raise IndiaError("--window must be between 0 and 10 bars")
+    if not plan.get("entry_time"):
+        raise IndiaError("the plan has no entry time: give --entry-time like 9:40 AM")
+    k = plan.get("entry_bar")
+    k = bar_of(plan["entry_time"]) if k is None else int(k)
+    u = parse_hhmm(until or plan.get("flat_by") or "15:30", "--until")
+    until_min = u.hour * 60 + u.minute
+    open_min = OPEN.hour * 60 + OPEN.minute
+    if (until_min - open_min) % BAR_MIN or until_min > CLOSE.hour * 60 + CLOSE.minute:
+        raise IndiaError("--until must be on the 5-minute grid and no later than 15:30")
+    last = (until_min - open_min) // BAR_MIN - 1
+    if last <= k:
+        raise IndiaError("%s leaves nothing to replay after the %s entry" % (u.strftime("%H:%M"), plan["entry_time"]))
+    days = tm_days(series, now_utc)
+    sessions = full_sessions(days, plan["date"])
+    if len(sessions) < MIN_SESSIONS:
+        raise IndiaError("only %d full session(s) of %s before %s in the data; the time machine needs at least %d"
+                         % (len(sessions), plan["symbol"], plan["date"], MIN_SESSIONS))
+    entry, stop, target = float(plan["entry"]), float(plan["stop"]), float(plan["target"])
+    mc = simulate(build_pool(sessions), entry, stop, target, k, last, replays, seed, window)
+    until_label = clock_label(u)
+    mc.update(until=u.strftime("%H:%M"), pool_sessions=len(sessions), pool_from=sessions[0][0],
+              pool_to=sessions[-1][0])
+    history = None
+    rng = plan.get("opening_range") or {}
+    if plan.get("setup") == "orb" and rng.get("minutes"):
+        srule = plan.get("stop_rule") if plan.get("stop_rule") in ("or-mid", "or-low") else "pct"
+        rule = {"or_minutes": int(rng["minutes"]), "stop_rule": srule, "target_r": mc["r_at_target"]}
+        if srule == "pct":
+            rule["stop_pct"] = round(100.0 * (entry - stop) / entry, 4)
+        history = history_replay(sessions, rule, last, float(plan.get("tick_size") or 0.05))
+    return {"created_by": "trader-india", "mode": "timemachine",
+            "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "symbol": plan["symbol"], "exchange": "NSE",
+            "plan": {kk: plan.get(kk) for kk in ("date", "entry", "entry_time", "stop", "target", "setup")},
+            "entry_bar": k, "mc": mc, "history": history, "verdict": verdict(mc, until_label),
+            "note": ("A simulation built from %s's own last %d full sessions. It is not a prediction: results, "
+                     "news, circuits and halts can do things those sessions never did. Charges are not in the "
+                     "R figures. Same seed, same numbers." % (plan["symbol"], len(sessions)))}
+
+
 # ---------------------------------------------------------------- fetching
 
 def progress(a, msg):
@@ -1291,7 +1501,8 @@ def cmd_plan(a):
     trule, tparam = parse_target(a.target)
     p = compute_plan(e["entry"], srule, sparam, trule, tparam, float(cfg["tick_size"]), rng.get("high"), rng.get("low"))
     plan = dict(p, created_by="trader-india", exchange="NSE", symbol=e["symbol"], side="buy", date=e.get("date"),
-                setup=e.get("setup"), entry_time=e.get("entry_time"), opening_range=e.get("opening_range"),
+                setup=e.get("setup"), entry_time=a.entry_time or e.get("entry_time"), entry_bar=e.get("entry_bar"),
+                stop_rule=srule, opening_range=e.get("opening_range"),
                 flat_by=a.flat_by or cfg["flat_by"], tick_size=float(cfg["tick_size"]))
     parse_hhmm(plan["flat_by"], "--flat-by")
     if not a.no_write:
@@ -1308,6 +1519,54 @@ def cmd_plan(a):
           % plan["flat_by"])
     if not a.no_write:
         print("Wrote %s%s. Next: `india.py size`." % (a.out, (" from %s" % src) if src else ""))
+    return 0
+
+
+def cmd_replay(a):
+    now = parse_now(a.now)
+    plan = read_json(a.plan, "plan")
+    if a.entry_time:
+        plan["entry_time"], plan["entry_bar"] = a.entry_time, None
+    sym = plan["symbol"]
+    series = load_one(sym, a.offline, "60d")
+    doc = time_machine(series, plan, now, a.replays, a.seed, a.window, a.until)
+    if not a.no_write:
+        write_json(a.out, doc)
+    if a.json:
+        print(json.dumps(doc, indent=2))
+        return 0
+    mc, h = doc["mc"], doc["history"]
+    until = clock_label(parse_hhmm(mc["until"]))
+    print("%s buy on NSE, %s: entry %s at %s, stop %s, target %s (%gR, risk %s a share)."
+          % (sym, plan["date"], _p(plan["entry"]), plan["entry_time"], _p(plan["stop"]), _p(plan["target"]),
+             mc["r_at_target"], _p(plan["entry"] - plan["stop"])))
+    print("%s replays of the rest of the session to %s (%d five-minute bars), seed %d."
+          % ("{:,}".format(mc["replays"]), until, mc["bars_left"], mc["seed"]))
+    print("Each bar is drawn whole from %s's own 5-minute bars at the same time of day (+-%d bars) over its last "
+          "%d full sessions (%s to %s)." % (sym, mc["window"], mc["pool_sessions"], mc["pool_from"], mc["pool_to"]))
+    print("")
+    print("  target first   %5.1f %%" % (100 * mc["p_target"]))
+    print("  stop first     %5.1f %%" % (100 * mc["p_stop"]))
+    print("  neither        %5.1f %%   still open at %s" % (100 * mc["p_neither"], until))
+    print("  green          %5.1f %%   target first, or above the entry at %s" % (100 * mc["p_green"], until))
+    print("")
+    print("  Price at %s: median %s, 90 %% of replays between %s and %s."
+          % (until, _p(mc["median_close"]), _p(mc["p5_close"]), _p(mc["p95_close"])))
+    print("  Average R: %+.3f (R = the %s risk: %+gR at the target, -1R at the stop; before charges)."
+          % (mc["avg_R"], _p(plan["entry"] - plan["stop"]), mc["r_at_target"]))
+    if h:
+        print("")
+        print("History: the same rule on each of those %d real sessions fired %d times: %d target, %d stop, "
+              "%d neither.%s" % (h["sessions"], h["triggered"], h["target"], h["stop"], h["close"],
+                                 (" Average R %+.3f." % h["avg_R"]) if h["avg_R"] is not None else ""))
+    print("")
+    print(doc["verdict"])
+    if mc["p_neither"] > 0.4:
+        print("%.1f %% of the replays hit neither by %s; the price then decides those." % (100 * mc["p_neither"], until))
+    print("")
+    print(doc["note"])
+    if not a.no_write:
+        print("Wrote %s. Next: `india.py size`." % a.out)
     return 0
 
 
@@ -1527,7 +1786,20 @@ def main(argv=None):
     p.add_argument("--stop", default="or-mid")
     p.add_argument("--target", default="2R")
     p.add_argument("--flat-by")
+    p.add_argument("--entry-time", help="when the entry bar closed, like 10:00 AM (for --entry plans)")
     p.add_argument("--out", default=path("plan.json"))
+    p.add_argument("--no-write", action="store_true")
+
+    p = sub.add_parser("replay", help="the Time Machine: 10,000 replays of the rest of the session")
+    base(p)
+    p.add_argument("--plan", default=path("plan.json"))
+    p.add_argument("--offline", metavar="PATH", help="a saved 60-day 5-minute chart")
+    p.add_argument("--entry-time", help="override the plan's entry time, like 9:40 AM")
+    p.add_argument("--until", help="end each replay at HH:MM (default: the plan's flat_by)")
+    p.add_argument("--replays", type=int, default=10000)
+    p.add_argument("--seed", type=int, default=19)
+    p.add_argument("--window", type=int, default=2)
+    p.add_argument("--out", default=path("timemachine.json"))
     p.add_argument("--no-write", action="store_true")
 
     p = sub.add_parser("size", help="shares for your rupee limits -> trader/india/orders.json")
@@ -1563,7 +1835,7 @@ def main(argv=None):
         return 1
     try:
         return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb, "entry": cmd_entry,
-                "plan": cmd_plan, "size": cmd_size, "check": cmd_check, "ticket": cmd_ticket,
+                "plan": cmd_plan, "replay": cmd_replay, "size": cmd_size, "check": cmd_check, "ticket": cmd_ticket,
                 "status": cmd_status}[a.cmd](a)
     except IndiaError as e:
         print("india.py: %s" % e, file=sys.stderr)
