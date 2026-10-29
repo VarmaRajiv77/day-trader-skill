@@ -1,6 +1,6 @@
 # The Day Trader skill
 
-11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
+12 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
 
 Free, MIT, no signup, no API key. The tools are plain Python that read free
 public data: Yahoo Finance charts, Nasdaq Trader's symbol lists, SEC EDGAR
@@ -57,7 +57,7 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The eleven
+## The twelve
 
 | command | job | what it does |
 | --- | --- | --- |
@@ -72,6 +72,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
+| `/trader-india` | India Desk | The whole day-trade chain for NSE stocks, in rupees and India time, ending in a ticket you type into your broker's app. |
 
 ## How to use it
 
@@ -119,6 +120,38 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
    card asks you one more time.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
+
+## Indian stocks (NSE)
+
+`/trader-india` runs the same chain for NSE stocks, in rupees and India time
+(9:15 AM to 3:30 PM IST). Its files live in `trader/india/`, apart from the
+US ones:
+
+```
+universe -> daily (before 9:15) -> orb (after 9:35) -> entry -> plan -> size -> check -> ticket
+```
+
+- The stock list is NSE's own equity file, series EQ.
+- The opening range is 9:15 to 9:30. The stop rounds to the NSE tick (0.05).
+- Sizing counts brokerage and taxes, so the max loss a trade includes the
+  charges. The defaults are for a Rs 1,00,000 account: Rs 1,000 a trade,
+  Rs 2,000 a day, two trades a day.
+- A running total loss limit (Rs 5,000 by default) blocks new entries once
+  your closed trades have lost that much. Log each result with
+  `ticket result`.
+- It never places an order. The ticket is the order to type into your
+  broker's app (INDmoney, Zerodha, Groww, any), and paper is the default.
+- NSE's 2026 holidays are built in. From 2027, check NSE's circular.
+
+```bash
+cp trader-india/config.example.json trader/india/config.json             # then set your limits
+python3 trader-india/india.py universe                                   # NSE EQUITY_L.csv
+python3 trader-india/india.py daily --symbols RELIANCE,TCS,INFY,HDFCBANK  # pre-market setups
+python3 trader-india/india.py orb                                        # breakouts of the 9:15 to 9:30 range
+python3 trader-india/india.py entry RELIANCE                             # waiting / triggered / expired
+python3 trader-india/india.py plan && python3 trader-india/india.py size # stop, target, shares
+python3 trader-india/india.py check && python3 trader-india/india.py ticket show
+```
 
 ## The tools
 
@@ -210,6 +243,7 @@ trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
+trader-india/       SKILL.md, india.py, config.example.json
 tests/              unittest suite + offline fixtures
 ```
 
