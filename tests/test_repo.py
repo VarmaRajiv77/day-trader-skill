@@ -5,15 +5,15 @@ import unittest
 
 from _load import ROOT
 
-# v2, the day-trading pack: the eleven folders the reel's repo card shows, plus the India desk
+# v2, the day-trading pack: the eleven folders the reel's repo card shows, plus the India desk and the dashboard
 SKILLS = ["trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
           "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
-          "trader-pelosi", "trader-india"]
-ABOUT = ("12 Claude skills for day trading: scan thousands of charts, track breaking news, time every "
+          "trader-pelosi", "trader-india", "trader-dashboard"]
+ABOUT = ("13 Claude skills for day trading: scan thousands of charts, track breaking news, time every "
          "entry and exit, and replay every outcome before you risk a dollar.")
 # skills on the way to an order carry the safety block
 ORDER_PATH = ["trader-scanner", "trader-entry", "trader-exit", "trader-timemachine", "trader-budget",
-              "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts", "trader-india"]
+              "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts", "trader-india", "trader-dashboard"]
 V1_ONLY = ["trader-copycat", "trader-screener", "trader-tax", "trader-rebalance"]
 
 
@@ -33,7 +33,7 @@ def every_text_file():
 
 
 class Repo(unittest.TestCase):
-    def test_twelve_skill_folders_at_the_root(self):
+    def test_thirteen_skill_folders_at_the_root(self):
         found = sorted(d for d in os.listdir(ROOT)
                        if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
         self.assertEqual(found, sorted(SKILLS))

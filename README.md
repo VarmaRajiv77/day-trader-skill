@@ -1,6 +1,6 @@
 # The Day Trader skill
 
-12 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
+13 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
 
 Free, MIT, no signup, no API key. The tools are plain Python that read free
 public data: Yahoo Finance charts, Nasdaq Trader's symbol lists, SEC EDGAR
@@ -57,7 +57,7 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The twelve
+## The thirteen
 
 | command | job | what it does |
 | --- | --- | --- |
@@ -72,6 +72,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
+| `/trader-dashboard` | Trade Dashboard | One page for US and Indian stocks: buy at, stop-loss, target, close-out time, the Time Machine odds, shares, charges and the risk check. |
 | `/trader-india` | India Desk | The whole day-trade chain for NSE stocks, in rupees and India time, ending in a ticket you type into your broker's app. |
 
 ## How to use it
@@ -156,6 +157,18 @@ python3 trader-india/india.py entry RELIANCE                             # waiti
 python3 trader-india/india.py plan && python3 trader-india/india.py replay # stop, target, the odds
 python3 trader-india/india.py size                                       # shares
 python3 trader-india/india.py check && python3 trader-india/india.py ticket show
+```
+
+## The dashboard
+
+After any run, in either market, `/trader-dashboard` writes
+`trader/dashboard.html`: one card a market with the buy price, the stop-loss,
+the target, the close-out time, the Time Machine odds, the shares, the
+charges, the max loss and the risk check, then the order to type. It reads
+the files the other skills wrote and fetches nothing.
+
+```bash
+python3 trader-dashboard/dashboard.py          # both markets -> trader/dashboard.html
 ```
 
 ## The tools
@@ -249,6 +262,7 @@ trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
 trader-india/       SKILL.md, india.py, config.example.json, nifty50.txt
+trader-dashboard/   SKILL.md, dashboard.py
 tests/              unittest suite + offline fixtures
 ```
 

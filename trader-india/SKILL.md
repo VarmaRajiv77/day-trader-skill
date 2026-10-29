@@ -133,6 +133,9 @@ of the budget a trade.
    they placed that exact order: `ticket placed --yes`. When it ends:
    `ticket result SYMBOL --pnl RUPEES` (after charges, negative for a loss).
 10. `india.py status` any time: trades today, risk used, the running total.
+11. After every live step, if `/trader-dashboard` is installed, run its
+    `dashboard.py` so the user sees the trade on one card
+    (`trader/dashboard.html`).
 
 ## Data and limits
 
