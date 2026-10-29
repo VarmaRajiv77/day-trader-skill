@@ -55,6 +55,7 @@ Everything lives in `trader/india/`, apart from the US files in `trader/`.
 | file | written by | read by |
 | --- | --- | --- |
 | `config.json` | the user (copy `config.example.json`) | every step |
+| `mylist.txt` | the user (copy `nifty50.txt`, the Nifty 50 as of 2026-10-29) | `--watchlist` |
 | `universe.txt` | `universe` | `daily`, `orb` |
 | `watchlist.json` | `daily`, `orb` | `--watchlist` |
 | `entry.json` | `entry` (on a trigger) | `plan` |
@@ -97,7 +98,11 @@ of the budget a trade.
 2. Before 9:15 AM IST: `india.py daily`. Say how many charts were fetched,
    passed the floors (Rs 50 and 1,00,000 shares by default) and were scanned,
    and the top few by setup. The whole list (about 2,000 EQ stocks, 100
-   requests) takes a minute or two; `--symbols` for the user's own list.
+   requests) takes a minute or two; `--symbols` for the user's own list. A
+   user with no list can start from the Nifty 50:
+   `cp "${CLAUDE_SKILL_DIR}/nifty50.txt" trader/india/mylist.txt`, then
+   `daily --watchlist trader/india/mylist.txt`. The Nifty 50 changes at the end
+   of March and September: check niftyindices.com and edit the file.
 3. After 9:35 AM IST: `india.py orb` (or `orb --watchlist trader/india/watchlist.json`).
 4. The user picks one chart. Never pick for them. `india.py entry SYMBOL`
    until it says TRIGGERED (re-run every few minutes; it reads completed

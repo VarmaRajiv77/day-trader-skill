@@ -363,6 +363,16 @@ class EndToEnd(unittest.TestCase):
         self.assertNotIn("_note", cfg)
         self.assertEqual(cfg["budget_inr"], 100000)
 
+    def test_nifty50_watchlist(self):
+        syms = india.symbols_from_file(os.path.join(ROOT, "trader-india", "nifty50.txt"))
+        self.assertEqual(len(syms), 50)
+        self.assertEqual(len(set(syms)), 50)
+        for s in syms:
+            self.assertRegex(s, r"^[A-Z0-9&\-]{1,20}$")
+        self.assertIn("M&M", syms)
+        self.assertIn("BSE", syms)
+        self.assertNotIn("WIPRO", syms)  # moved to the Nifty Next 50 on 30 Sep 2026
+
     def test_example_config_is_the_defaults(self):
         with open(os.path.join(ROOT, "trader-india", "config.example.json")) as fh:
             ex = json.load(fh)

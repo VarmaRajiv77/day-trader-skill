@@ -147,6 +147,7 @@ universe -> daily (before 9:15) -> orb (after 9:35) -> entry -> plan -> size -> 
 cp trader-india/config.example.json trader/india/config.json             # then set your limits
 python3 trader-india/india.py universe                                   # NSE EQUITY_L.csv
 python3 trader-india/india.py daily --symbols RELIANCE,TCS,INFY,HDFCBANK  # pre-market setups
+python3 trader-india/india.py daily --watchlist trader-india/nifty50.txt  # or the Nifty 50
 python3 trader-india/india.py orb                                        # breakouts of the 9:15 to 9:30 range
 python3 trader-india/india.py entry RELIANCE                             # waiting / triggered / expired
 python3 trader-india/india.py plan && python3 trader-india/india.py size # stop, target, shares
@@ -243,7 +244,7 @@ trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
-trader-india/       SKILL.md, india.py, config.example.json
+trader-india/       SKILL.md, india.py, config.example.json, nifty50.txt
 tests/              unittest suite + offline fixtures
 ```
 
