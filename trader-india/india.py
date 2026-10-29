@@ -1012,6 +1012,13 @@ def fetch_spark(symbols, rng, interval, pause, a=None):
     return data, failed
 
 
+def nothing_fetched(failed, n):
+    """Raise when not one chart came back, so a dead network never reads as 'no setups'."""
+    why = sorted(set((failed or {}).values()))
+    raise IndiaError("fetched 0 of %d charts, so nothing was scanned (%s). Check the connection to Yahoo "
+                     "Finance, or pass --offline." % (n, why[0] if why else "no data"))
+
+
 def symbols_from_file(p):
     if not os.path.exists(p):
         raise IndiaError("no file at %s" % p)
@@ -1112,6 +1119,8 @@ def cmd_daily(a):
                  % ("{:,}".format(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
         data, failed = fetch_spark(symbols, "3mo", "1d", a.pause, a)
     hits, counts, last_date = scan_daily(data, symbols, now, a.min_price, a.min_volume)
+    if not counts["fetched"]:
+        nothing_fetched(failed, len(symbols))
     nfailed = len(symbols) - counts["fetched"]
     doc = {"created_by": "trader-india", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "daily",
            "exchange": "NSE", "as_of": ("%s close" % last_date.isoformat()) if last_date else None,
@@ -1185,6 +1194,8 @@ def cmd_orb(a):
                                      confirm, a.max_confirm)
     failed = dict(failed or {})
     failed.update(failed2)
+    if not counts["fetched"]:
+        nothing_fetched(failed, len(symbols))
     nfailed = len([s for s in symbols if s in failed])
     doc = {"created_by": "trader-india", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "orb",
            "exchange": "NSE", "as_of": "%s %s IST" % (day.isoformat(), cutoff.strftime("%H:%M")),

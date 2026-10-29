@@ -338,6 +338,22 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("Today: 1 of 2 trades", text)
         self.assertIn("Rs 4,050.00 left", text)
 
+    def test_a_dead_network_is_not_no_setups(self):
+        def down(path):
+            raise india.IndiaError("Yahoo answered Tunnel connection failed: 403 Forbidden for /v7/finance/spark")
+        old = india.yahoo_get
+        india.yahoo_get = down
+        try:
+            code, text, err = self.run_cli("daily", "--symbols", "RELIANCE,TCS", "--pause", "0",
+                                           "--now", "2026-10-29 08:30")
+            self.assertEqual(code, 1)
+            self.assertIn("fetched 0 of 2 charts, so nothing was scanned", err)
+            self.assertIn("403 Forbidden", err)
+            self.assertNotIn("No setups", text)
+            self.assertFalse(os.path.exists("trader/india/watchlist.json"))
+        finally:
+            india.yahoo_get = old
+
     def test_config_overrides_and_comments(self):
         os.makedirs("trader/india")
         with open("trader/india/config.json", "w") as fh:
