@@ -456,6 +456,30 @@ class EndToEnd(unittest.TestCase):
         finally:
             india.yahoo_get = old
 
+    def test_replay_all(self):
+        os.makedirs("charts60")
+        with open("charts60/ABC.json", "w") as fh:
+            json.dump(history_chart("ABC"), fh)
+        t = ["--now", "2026-10-29 09:46"]
+        code, text, err = self.run_cli("orb", "--offline", "ABC.json", *t)
+        self.assertEqual(code, 0, err)
+        code, text, err = self.run_cli("replay-all", "--offline", "charts60", "--replays", "300", *t)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Time Machine on 1 of 1 breakouts", text)
+        self.assertIn("not ranked", text)
+        with open("trader/india/replays/ABC.json") as fh:
+            doc = json.load(fh)
+        self.assertEqual((doc["plan"]["date"], doc["plan"]["entry"], doc["plan"]["stop"]), ("2026-10-29", 101.0, 99.75))
+        self.assertEqual(doc["mc"]["replays"], 300)
+
+    def test_replay_all_wants_an_orb_scan(self):
+        os.makedirs("trader/india")
+        with open("trader/india/watchlist.json", "w") as fh:
+            json.dump({"mode": "daily", "hits": [{"symbol": "ABC"}]}, fh)
+        code, _, err = self.run_cli("replay-all", "--now", "2026-10-29 09:46")
+        self.assertEqual(code, 1)
+        self.assertIn("needs an opening-range scan", err)
+
     def test_config_overrides_and_comments(self):
         os.makedirs("trader/india")
         with open("trader/india/config.json", "w") as fh:

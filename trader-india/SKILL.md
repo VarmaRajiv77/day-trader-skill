@@ -39,6 +39,7 @@ python3 "${CLAUDE_SKILL_DIR}/india.py" orb                            # after 9:
 python3 "${CLAUDE_SKILL_DIR}/india.py" entry RELIANCE                 # waiting / triggered / expired -> entry.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" plan --stop or-mid --target 2R # -> plan.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" replay                         # the Time Machine: 10,000 replays -> timemachine.json
+python3 "${CLAUDE_SKILL_DIR}/india.py" replay-all                     # ... on every breakout in the scan -> replays/
 python3 "${CLAUDE_SKILL_DIR}/india.py" size                           # -> orders.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" check                          # PASS / BLOCK -> state/risk.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" ticket show                    # the order in plain words
@@ -109,6 +110,8 @@ of the budget a trade.
    `daily --watchlist trader/india/mylist.txt`. The Nifty 50 changes at the end
    of March and September: check niftyindices.com and edit the file.
 3. After 9:35 AM IST: `india.py orb` (or `orb --watchlist trader/india/watchlist.json`).
+   To see the odds of every breakout before the user picks: `india.py replay-all`
+   (one request a stock), then the dashboard's options table lists them all.
 4. The user picks one chart. Never pick for them. `india.py entry SYMBOL`
    until it says TRIGGERED (re-run every few minutes; it reads completed
    5-minute bars).

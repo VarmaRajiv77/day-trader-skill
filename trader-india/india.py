@@ -8,6 +8,7 @@
     python3 india.py entry RELIANCE                    # waiting / triggered / expired -> entry.json
     python3 india.py plan --stop or-mid --target 2R    # stop and target -> plan.json
     python3 india.py replay                            # the Time Machine -> timemachine.json
+    python3 india.py replay-all                        # ... on every breakout in the scan -> replays/
     python3 india.py size                              # shares for your rupee limits -> orders.json
     python3 india.py check                             # PASS / BLOCK -> state/risk.json
     python3 india.py ticket show                       # the order to type into your broker's app
@@ -1570,6 +1571,55 @@ def cmd_replay(a):
     return 0
 
 
+def cmd_replay_all(a):
+    """The Time Machine on every opening-range breakout in the watchlist, one file each."""
+    now = parse_now(a.now)
+    cfg = read_config(a.config)
+    wl = read_json(a.watchlist, "watchlist")
+    if wl.get("mode") != "orb":
+        raise IndiaError("replay-all needs an opening-range scan (india.py orb): a daily scan has no entry levels yet")
+    date = str(wl.get("as_of") or "")[:10]
+    hits = [h for h in wl.get("hits") or [] if h.get("or_high") is not None]
+    if a.limit:
+        hits = hits[:a.limit]
+    if not hits:
+        raise IndiaError("the scan in %s has no breakouts to replay" % a.watchlist)
+    tick = float(cfg["tick_size"])
+    trule, tparam = parse_target(a.target)
+    done, failed = [], {}
+    for k, h in enumerate(hits):
+        sym = h["symbol"]
+        try:
+            p = compute_plan(h["price"], "or-mid", None, trule, tparam, tick, h["or_high"], h["or_low"])
+            plan = dict(p, symbol=sym, date=date, setup="orb", stop_rule="or-mid", entry_time=h.get("at"),
+                        entry_bar=h.get("bar_index"), flat_by=cfg["flat_by"], tick_size=tick,
+                        opening_range={"high": h["or_high"], "low": h["or_low"],
+                                       "minutes": int(wl.get("or_minutes") or 15)})
+            if k and not a.offline and a.pause:
+                SLEEP(a.pause)
+            series = load_one(sym, a.offline, "60d")
+            doc = time_machine(series, plan, now, a.replays, a.seed, 2, None)
+        except IndiaError as e:
+            failed[sym] = str(e)
+            continue
+        write_json(os.path.join(a.out_dir, sym + ".json"), doc)
+        done.append((sym, doc))
+    if a.json:
+        print(json.dumps({"done": [s for s, _ in done], "failed": failed}, indent=2))
+        return 0 if done else 1
+    print("Time Machine on %d of %d breakouts from the %s scan (%s replays each, seed %d):"
+          % (len(done), len(hits), date, "{:,}".format(a.replays), a.seed))
+    for sym, doc in done:
+        mc = doc["mc"]
+        print("  %-12s target first %5.1f %%  stop first %5.1f %%  neither %5.1f %%  %s"
+              % (sym, 100 * mc["p_target"], 100 * mc["p_stop"], 100 * mc["p_neither"], doc["verdict"].split(":")[0]))
+    for sym, why in failed.items():
+        print("  %-12s not run: %s" % (sym, why))
+    print("Listed in the scan's order, not ranked. Simulations, not predictions. Wrote %s/. "
+          "Next: the dashboard shows them in its options table." % a.out_dir)
+    return 0 if done else 1
+
+
 def cmd_size(a):
     cfg = read_config(a.config)
     plan = read_json(a.plan, "plan")
@@ -1802,6 +1852,17 @@ def main(argv=None):
     p.add_argument("--out", default=path("timemachine.json"))
     p.add_argument("--no-write", action="store_true")
 
+    p = sub.add_parser("replay-all", help="the Time Machine on every breakout in the scan")
+    base(p)
+    p.add_argument("--watchlist", default=path("watchlist.json"))
+    p.add_argument("--offline", metavar="PATH", help="a folder of <SYMBOL>.json 60-day charts, or one bundle file")
+    p.add_argument("--target", default="2R")
+    p.add_argument("--limit", type=int, help="only the first N breakouts")
+    p.add_argument("--replays", type=int, default=10000)
+    p.add_argument("--seed", type=int, default=19)
+    p.add_argument("--pause", type=float, default=PAUSE)
+    p.add_argument("--out-dir", default=path("replays"))
+
     p = sub.add_parser("size", help="shares for your rupee limits -> trader/india/orders.json")
     base(p)
     p.add_argument("--plan", default=path("plan.json"))
@@ -1835,7 +1896,7 @@ def main(argv=None):
         return 1
     try:
         return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb, "entry": cmd_entry,
-                "plan": cmd_plan, "replay": cmd_replay, "size": cmd_size, "check": cmd_check, "ticket": cmd_ticket,
+                "plan": cmd_plan, "replay": cmd_replay, "replay-all": cmd_replay_all, "size": cmd_size, "check": cmd_check, "ticket": cmd_ticket,
                 "status": cmd_status}[a.cmd](a)
     except IndiaError as e:
         print("india.py: %s" % e, file=sys.stderr)

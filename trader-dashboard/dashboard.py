@@ -27,6 +27,7 @@ import argparse
 import datetime
 import html
 import json
+import math
 import os
 import sys
 
@@ -68,6 +69,12 @@ border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:6px 0 0}
 details{margin-top:12px}summary{cursor:pointer;font-weight:600;font-size:14px}
 ul.hits{margin:8px 0 0;padding-left:18px;font-size:14px}
 footer{color:var(--muted);font-size:12px;margin-top:24px}
+.scroll{overflow-x:auto;margin-top:8px}
+table.opts{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+table.opts th{text-align:left;color:var(--muted);font-weight:600;font-size:12px;padding:6px 8px;
+border-bottom:1px solid var(--line);white-space:nowrap}
+table.opts td{padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.opts td.n{text-align:right}.neg{color:var(--bad)}.pos{color:var(--good)}
 """
 
 
@@ -118,7 +125,17 @@ def read_json(path):
 def load_market(root, market):
     names = ["watchlist", "entry", "plan", "timemachine", "orders", "state/risk"]
     names.append("state/trades" if market == "india" else "state/broker")
-    return {n.replace("state/", ""): read_json(os.path.join(root, n + ".json")) for n in names}
+    d = {n.replace("state/", ""): read_json(os.path.join(root, n + ".json")) for n in names}
+    d["config"] = read_json(os.path.join(root, "config.json"))
+    rdir = os.path.join(root, "replays")
+    d["replays"] = {}
+    if os.path.isdir(rdir):
+        for f in sorted(os.listdir(rdir)):
+            if f.endswith(".json"):
+                doc = read_json(os.path.join(rdir, f))
+                if isinstance(doc, dict):
+                    d["replays"][f[:-5].upper()] = doc
+    return d
 
 
 def _f(x):
@@ -199,6 +216,149 @@ def card_data(d, market, today):
     return c
 
 
+# ---------------------------------------------------------------- all options
+
+US_LIMITS = {"budget": 5000, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_usd": 4000,
+             "max_loss_per_trade_usd": 50, "flat_by": "15:55"}
+INDIA_LIMITS = {"budget_inr": 100000, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_inr": 75000,
+                "max_loss_per_trade_inr": 1000, "brokerage_per_order_inr": 20, "charges_pct_round_trip": 0.05,
+                "tick_size": 0.05, "flat_by": "15:10"}
+
+
+def to_tick(x, tick):
+    """Round DOWN to the tick, in paise or cents to dodge float dust."""
+    unit = int(round(float(tick) * 100))
+    return round(math.floor(float(x) * 100 / unit + 1e-9) * unit / 100.0, 2)
+
+
+def size_option(entry, stop, market, cfg):
+    """(shares, charges or None, max loss) inside the same four limits as trader-budget and india.py size."""
+    risk = entry - stop
+    if market == "india":
+        budget = float(cfg["budget_inr"])
+        fixed = 2 * float(cfg["brokerage_per_order_inr"])
+        pct = float(cfg["charges_pct_round_trip"]) / 100.0
+        by_loss = (float(cfg["max_loss_per_trade_inr"]) - fixed) / (risk + pct * entry)
+        max_order = float(cfg["max_order_inr"])
+    else:
+        budget = float(cfg["budget"])
+        fixed, pct = 0.0, 0.0
+        by_loss = float(cfg["max_loss_per_trade_usd"]) / risk
+        max_order = float(cfg["max_order_usd"])
+    caps = [by_loss, budget * float(cfg["max_position_pct"]) / 100.0 / entry, max_order / entry,
+            budget * (1 - float(cfg["cash_buffer_pct"]) / 100.0) / entry]
+    qty = max(0, int(math.floor(min(caps) + 1e-9)))
+    if not qty:
+        return 0, None, None
+    charges = round(fixed + pct * entry * qty, 2) if market == "india" else None
+    return qty, charges, round(qty * risk + (charges or 0), 2)
+
+
+def replay_for(d, sym, date, entry):
+    """The saved Time Machine run for this exact option, or None."""
+    doc = (d.get("replays") or {}).get(sym)
+    if not doc:
+        return None
+    p = doc.get("plan") or {}
+    if p.get("date") != date or _f(p.get("entry")) is None or abs(_f(p["entry"]) - entry) > 0.011:
+        return None
+    mc = doc.get("mc") or {}
+    return {"target": mc.get("p_target"), "stop": mc.get("p_stop"), "neither": mc.get("p_neither"),
+            "verdict": doc.get("verdict")}
+
+
+def options(d, market, cfg, target_r=2.0):
+    """Every opening-range breakout in the scan as a plan: buy at the breakout close, stop at the
+    range's midpoint (rounded down to the tick), target at target_r times the risk, sized to the
+    limits. Daily-scan hits have no intraday range yet, so they come back without levels. Pure."""
+    wl = d.get("watchlist") or {}
+    hits = wl.get("hits") or []
+    tick = float(cfg.get("tick_size") or (0.05 if market == "india" else 0.01))
+    date = str(wl.get("as_of") or "")[:10]
+    rows = []
+    for h in hits:
+        sym = str(h.get("symbol") or "").upper()
+        entry, oh, ol = _f(h.get("price")), _f(h.get("or_high")), _f(h.get("or_low"))
+        row = {"symbol": sym, "signal": h.get("at"), "setups": h.get("setups") or []}
+        if entry is None or oh is None or ol is None:
+            row["note"] = "a daily setup: no breakout levels until the opening range is in"
+            rows.append(row)
+            continue
+        stop = to_tick((oh + ol) / 2.0, tick)
+        if stop >= entry:
+            row["note"] = "the range's midpoint is not below the price"
+            rows.append(row)
+            continue
+        risk = round(entry - stop, 2)
+        target = to_tick(entry + target_r * risk, tick)
+        qty, charges, max_loss = size_option(entry, stop, market, cfg)
+        row.update(entry=entry, stop=stop, target=target, risk_share=risk, qty=qty, charges=charges,
+                   max_loss=max_loss, value=round(qty * entry, 2) if qty else None,
+                   odds=replay_for(d, sym, date, entry))
+        if not qty:
+            row["note"] = "the stop is too far for your max loss: 0 shares"
+        rows.append(row)
+    return {"market": market, "date": date, "as_of": wl.get("as_of"), "mode": wl.get("mode"),
+            "target_r": target_r, "flat_by": cfg.get("flat_by"), "rows": rows}
+
+
+def render_options(opt, today):
+    m = opt["market"]
+    tz = MARKETS[m]["tz"]
+    rows = opt["rows"]
+    if not rows:
+        return ""
+    old = opt["date"] and opt["date"] != today
+    out = ['<details open><summary>All options from the scan: %d chart%s (as of %s)</summary>'
+           % (len(rows), "" if len(rows) == 1 else "s", _e(opt["as_of"]))]
+    if old:
+        out.append('<div class="box warn">OLD: this scan is from %s, not today. Re-run it before acting.</div>'
+                   % _e(opt["date"]))
+    out.append('<p class="sub">Every chart that matched the rule, in the order it matched. Not ranked and not picks. '
+               'Buy at the breakout close, stop-loss at the middle of the opening range, target %gx the risk, '
+               'sized to your max loss; close out by %s %s either way. Pick one, then run the risk check on it.</p>'
+               % (opt["target_r"], _e(_clock(opt.get("flat_by"))), tz))
+    head = ["Stock", "Signal", "Buy at", "Stop-loss", "Target", "Shares", "Charges", "Max loss", "Odds: target / stop"]
+    out.append('<div class="scroll"><table class="opts"><tr>%s</tr>' % "".join("<th>%s</th>" % _e(x) for x in head))
+    for r in rows:
+        if r.get("entry") is None:
+            out.append('<tr><td><b>%s</b></td><td colspan="8" class="missing">%s%s</td></tr>'
+                       % (_e(r["symbol"]), _e(", ".join(str(s).replace("_", " ") for s in r["setups"])),
+                          (" &middot; " + _e(r["note"])) if r.get("note") else ""))
+            continue
+        o = r.get("odds")
+        if o and o.get("target") is not None:
+            lean = "toward the stop" in str(o.get("verdict") or "")
+            odds = '<span class="%s">%.0f%% / %.0f%%</span>' % ("neg" if lean else "", 100 * o["target"], 100 * o["stop"])
+        else:
+            odds = '<span class="missing">not run</span>'
+        charges = money(r["charges"], m) if m == "india" else "add yours"
+        out.append('<tr><td><b>%s</b></td><td>%s</td><td class="n">%s</td><td class="n neg">%s</td><td class="n pos">%s</td>'
+                   '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td>%s</td></tr>'
+                   % (_e(r["symbol"]), _e(r.get("signal") or ""), _e(price(r["entry"])), _e(price(r["stop"])),
+                      _e(price(r["target"])), _e(r["qty"]) if r["qty"] else '<span class="missing">0</span>',
+                      _e(charges) if r["qty"] else "-", _e(money(r["max_loss"], m)) if r["qty"] else "-", odds))
+    out.append("</table></div>")
+    if any(r.get("entry") is not None and not r.get("odds") for r in rows):
+        out.append('<p class="sub">Odds "not run": run the Time Machine on the options you are considering (%s).</p>'
+                   % _e("india.py replay-all" if m == "india" else "dashboard.py --replay-commands"))
+    out.append("</details>")
+    return "".join(out)
+
+
+def replay_commands(opt, script):
+    """Shell lines that run the US Time Machine on each option without odds, saving to trader/replays/."""
+    lines = []
+    for r in opt["rows"]:
+        if r.get("entry") is None or r.get("odds") or not r.get("signal"):
+            continue
+        lines.append('python3 "%s" run --symbol %s --date %s --entry %s --stop %s --target %s --entry-time "%s" '
+                     '--stop-rule or_mid --write trader/replays/%s.json'
+                     % (script, r["symbol"], opt["date"], price(r["entry"]).replace(",", ""),
+                        price(r["stop"]).replace(",", ""), price(r["target"]).replace(",", ""), r["signal"], r["symbol"]))
+    return lines
+
+
 # ---------------------------------------------------------------- page
 
 def _e(x):
@@ -228,7 +388,7 @@ def _clock(t):
         return str(t or "")
 
 
-def render_card(c, d, cfg_paper, note=None):
+def render_card(c, d, cfg_paper, note=None, today=""):
     m = c["market"]
     meta = MARKETS[m]
     tz = meta["tz"]
@@ -238,7 +398,7 @@ def render_card(c, d, cfg_paper, note=None):
     if not c.get("symbol"):
         out.append('<p class="missing">No trade planned yet. Start with the scan: <code>%s</code>, pick a stock, '
                    'then <code>%s</code>.</p>' % (_e(meta["scan"]), _e(meta["plan"])))
-        out.append(_hits(d, m))
+        out.append(render_options(options(d, m, limits(d, m)), today))
         out.append("</section>")
         return "".join(out)
     if c.get("old"):
@@ -313,29 +473,15 @@ def render_card(c, d, cfg_paper, note=None):
                         "Nothing here places an order. You type it yourself."
                         % (paper, c["qty"], ex, c["symbol"], price(c["entry"]), c["qty"], price(c["stop"]),
                            c["qty"], price(c["target"]), _clock(c.get("flat_by")), tz)))
-    out.append(_hits(d, m))
+    out.append(render_options(options(d, m, limits(d, m)), today))
     out.append("</section>")
     return "".join(out)
 
 
-def _hits(d, m):
-    wl = d.get("watchlist")
-    if not wl or not wl.get("hits"):
-        return ""
-    hits = wl["hits"]
-    items = []
-    for h in hits[:12]:
-        bits = [price(_f(h.get("price")))]
-        if h.get("at"):
-            bits.append("broke out at %s" % h["at"])
-        if h.get("setups") and h["setups"] != ["orb"]:
-            bits.append(", ".join(str(s).replace("_", " ") for s in h["setups"]))
-        items.append("<li><b>%s</b> %s</li>" % (_e(h.get("symbol")), " &middot; ".join(_e(x) for x in bits)))
-    more = ('<li class="missing">and %d more</li>' % (len(hits) - 12)) if len(hits) > 12 else ""
-    return ('<details><summary>The scan: %d chart%s matched a rule (as of %s)</summary><ul class="hits">%s%s</ul>'
-            '<p class="sub">A list of charts that match a rule, not a list of stocks to buy. You pick; the card above '
-            'is filled in for the one you pick.</p></details>'
-            % (len(hits), "" if len(hits) == 1 else "s", _e(wl.get("as_of")), "".join(items), more))
+def limits(d, m):
+    cfg = dict(INDIA_LIMITS if m == "india" else US_LIMITS)
+    cfg.update({k: v for k, v in (d.get("config") or {}).items() if not str(k).startswith("_")})
+    return cfg
 
 
 def render(now_utc, markets, paper=True, notes=None):
@@ -349,7 +495,7 @@ def render(now_utc, markets, paper=True, notes=None):
            '<div class="box warn">%s</div>' % _e(NOTE)]
     for m, d in markets:
         today = local_now(now_utc, m).date().isoformat()
-        out.append(render_card(card_data(d, m, today), d, paper, notes.get(m)))
+        out.append(render_card(card_data(d, m, today), d, paper, notes.get(m), today))
     out.append('<footer>Prices from Yahoo Finance (free, can lag): check them in your broker\'s app before acting. '
                'Most people who day trade lose money. Education and tooling, not financial advice.</footer>'
                '</main></body></html>')
@@ -365,6 +511,11 @@ def main(argv=None):
     ap.add_argument("--now", help='pretend it is this time, like "2026-10-19T14:16:00Z"')
     ap.add_argument("--note-us", help="a line shown on the US card, like a replay date")
     ap.add_argument("--note-india", help="a line shown on the India card")
+    ap.add_argument("--replay-commands", action="store_true",
+                    help="print the US Time Machine commands for every option without odds, then stop")
+    ap.add_argument("--timemachine", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                                          "trader-timemachine", "timemachine.py"),
+                    help="path to trader-timemachine's timemachine.py (for --replay-commands)")
     a = ap.parse_args(argv)
     now = parse_now(a.now)
     markets = []
@@ -372,6 +523,18 @@ def main(argv=None):
         markets.append(("us", load_market(a.us_dir, "us")))
     if a.market in ("both", "india"):
         markets.append(("india", load_market(a.india_dir, "india")))
+    if a.replay_commands:
+        us = dict(markets).get("us") or load_market(a.us_dir, "us")
+        lines = replay_commands(options(us, "us", limits(us, "us")), a.timemachine)
+        print("\n".join(lines) if lines else "Every US option already has its odds (or the scan has none).")
+        return 0
+    for m, d in markets:
+        opt = options(d, m, limits(d, m))
+        if opt["rows"]:
+            root = a.india_dir if m == "india" else a.us_dir
+            with open(os.path.join(root, "options.json"), "w", encoding="utf-8") as fh:
+                json.dump(opt, fh, indent=2)
+                fh.write("\n")
     cfg = read_json(os.path.join(a.india_dir if a.market == "india" else a.us_dir, "config.json")) or {}
     page = render(now, markets, bool(cfg.get("paper", True)), {"us": a.note_us, "india": a.note_india})
     d = os.path.dirname(a.out)

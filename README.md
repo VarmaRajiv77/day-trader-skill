@@ -164,8 +164,10 @@ python3 trader-india/india.py check && python3 trader-india/india.py ticket show
 After any run, in either market, `/trader-dashboard` writes
 `trader/dashboard.html`: one card a market with the buy price, the stop-loss,
 the target, the close-out time, the Time Machine odds, the shares, the
-charges, the max loss and the risk check, then the order to type. It reads
-the files the other skills wrote and fetches nothing.
+charges, the max loss and the risk check, then the order to type. Under each
+card, a table lists every breakout from the scan with the same levels and
+its odds, in breakout order, never ranked. It reads the files the other
+skills wrote and fetches nothing.
 
 ```bash
 python3 trader-dashboard/dashboard.py          # both markets -> trader/dashboard.html
