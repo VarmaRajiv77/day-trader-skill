@@ -128,11 +128,14 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 US ones:
 
 ```
-universe -> daily (before 9:15) -> orb (after 9:35) -> entry -> plan -> size -> check -> ticket
+universe -> daily (before 9:15) -> orb (after 9:35) -> entry -> plan -> replay -> size -> check -> ticket
 ```
 
 - The stock list is NSE's own equity file, series EQ.
 - The opening range is 9:15 to 9:30. The stop rounds to the NSE tick (0.05).
+- `replay` is the Time Machine for NSE: 10,000 replays of the rest of the
+  session to your flat-by time from the stock's own last 60 days of bars,
+  plus every past day the rule fired, and one honest verdict.
 - Sizing counts brokerage and taxes, so the max loss a trade includes the
   charges. The defaults are for a Rs 1,00,000 account: Rs 1,000 a trade,
   Rs 2,000 a day, two trades a day.
@@ -150,7 +153,8 @@ python3 trader-india/india.py daily --symbols RELIANCE,TCS,INFY,HDFCBANK  # pre-
 python3 trader-india/india.py daily --watchlist trader-india/nifty50.txt  # or the Nifty 50
 python3 trader-india/india.py orb                                        # breakouts of the 9:15 to 9:30 range
 python3 trader-india/india.py entry RELIANCE                             # waiting / triggered / expired
-python3 trader-india/india.py plan && python3 trader-india/india.py size # stop, target, shares
+python3 trader-india/india.py plan && python3 trader-india/india.py replay # stop, target, the odds
+python3 trader-india/india.py size                                       # shares
 python3 trader-india/india.py check && python3 trader-india/india.py ticket show
 ```
 

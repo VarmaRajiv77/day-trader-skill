@@ -281,6 +281,101 @@ class Risk(unittest.TestCase):
                             india.check_order(self.order(date="2026-10-28"), self.CFG, None, now(10, 0))[1]))
 
 
+def history_chart(sym, sessions=30, day=DAY):
+    """Synthetic 5-minute history: `sessions` full NSE days before `day`, then `day` itself
+    up to the ORB_BARS breakout. A seeded random walk, made up for the tests."""
+    import random as _r
+    rng = _r.Random(7)
+    t, o, h, l, c, v = [], [], [], [], [], []
+    days, d = [], day - datetime.timedelta(days=1)
+    while len(days) < sessions:
+        if india.trading_day(d)[0]:
+            days.append(d)
+        d -= datetime.timedelta(days=1)
+    p = 100.0
+    for x in reversed(days):
+        for k in range(india.SESSION_BARS):
+            op = p
+            p = round(p * (1 + rng.gauss(0, 0.002)), 2)
+            t.append(ts(x, 9, 15) + 300 * k)
+            o.append(op)
+            h.append(round(max(op, p) * (1 + abs(rng.gauss(0, 0.001))), 2))
+            l.append(round(min(op, p) * (1 - abs(rng.gauss(0, 0.001))), 2))
+            c.append(p)
+            v.append(1000)
+    today = chart(sym, ORB_BARS, day)["chart"]["result"][0]
+    q = today["indicators"]["quote"][0]
+    t += today["timestamp"]
+    o += q["open"]
+    h += q["high"]
+    l += q["low"]
+    c += q["close"]
+    v += q["volume"]
+    return {"chart": {"result": [{"meta": {"symbol": sym + ".NS"}, "timestamp": t,
+                                  "indicators": {"quote": [{"open": o, "high": h, "low": l, "close": c,
+                                                            "volume": v}]}}], "error": None}}
+
+
+class TimeMachine(unittest.TestCase):
+    PLAN = {"symbol": "ABC", "date": DAY.isoformat(), "entry": 101.0, "stop": 99.75, "target": 103.5,
+            "entry_time": "9:40 AM", "entry_bar": 4, "setup": "orb", "stop_rule": "or-mid",
+            "opening_range": {"high": 100.5, "low": 99.0, "minutes": 15}, "flat_by": "15:10", "tick_size": 0.05}
+
+    def setUp(self):
+        self.series = series_of(history_chart("ABC"))
+
+    def test_bar_of(self):
+        self.assertEqual(india.bar_of("9:20 AM"), 0)
+        self.assertEqual(india.bar_of("9:40 AM"), 4)
+        self.assertEqual(india.bar_of("15:30"), 74)
+        with self.assertRaises(india.IndiaError):
+            india.bar_of("4:00 PM")
+
+    def test_full_sessions_and_pool(self):
+        days = india.tm_days(self.series, now(9, 46))
+        full = india.full_sessions(days, DAY.isoformat())
+        self.assertEqual(len(full), 30)
+        self.assertEqual(len(days[DAY.isoformat()]), 6)   # today's bars are not in the pool
+        pool = india.build_pool(full)
+        self.assertEqual(len(pool[1]), 30)
+        self.assertEqual(pool[0], [])
+
+    def test_replays_add_up_and_repeat(self):
+        doc = india.time_machine(self.series, self.PLAN, now(9, 46), replays=2000)
+        mc = doc["mc"]
+        self.assertAlmostEqual(mc["p_target"] + mc["p_stop"] + mc["p_neither"], 1.0, places=3)
+        self.assertEqual(mc["bars_left"], 70 - 4)          # to the 15:05 bar, closing 15:10
+        self.assertEqual(mc["r_at_target"], 2.0)
+        self.assertEqual(mc["pool_sessions"], 30)
+        again = india.time_machine(self.series, self.PLAN, now(9, 46), replays=2000)
+        self.assertEqual(mc, again["mc"])
+        other = india.time_machine(self.series, self.PLAN, now(9, 46), replays=2000, seed=7)
+        self.assertNotEqual(mc["p_target"], other["mc"]["p_target"])
+        h = doc["history"]
+        self.assertEqual(h["sessions"], 30)
+        self.assertEqual(h["target"] + h["stop"] + h["close"], h["triggered"])
+        self.assertEqual(h["rule"]["stop_rule"], "or-mid")
+        self.assertIn("Charges are not in the R figures", doc["note"])
+
+    def test_refusals(self):
+        short = series_of(history_chart("ABC", sessions=10))
+        with self.assertRaisesRegex(india.IndiaError, "needs at least 20"):
+            india.time_machine(short, self.PLAN, now(9, 46), replays=10)
+        with self.assertRaisesRegex(india.IndiaError, "nothing to replay"):
+            india.time_machine(self.series, self.PLAN, now(9, 46), replays=10, until="09:40")
+        with self.assertRaisesRegex(india.IndiaError, "no entry time"):
+            india.time_machine(self.series, dict(self.PLAN, entry_time=None), now(9, 46), replays=10)
+
+    def test_verdicts(self):
+        mc = {"p_target": 0.30, "p_stop": 0.28, "r_at_target": 1.0}
+        self.assertTrue(india.verdict(mc, "3:10 PM").startswith("Close to a coin flip"))
+        mc = {"p_target": 0.30, "p_stop": 0.40, "r_at_target": 2.0}   # 43 % vs 33 % to break even
+        self.assertTrue(india.verdict(mc, "3:10 PM").startswith("Leans toward the target"))
+        mc = {"p_target": 0.10, "p_stop": 0.60, "r_at_target": 1.0}
+        self.assertTrue(india.verdict(mc, "3:10 PM").startswith("Strongly toward the stop"))
+        self.assertIn("No replay", india.verdict({"p_target": 0, "p_stop": 0, "r_at_target": 1.0}, "3:10 PM"))
+
+
 class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -308,6 +403,13 @@ class EndToEnd(unittest.TestCase):
         code, text, err = self.run_cli("plan", *t)
         self.assertEqual(code, 0, err)
         self.assertIn("Stop 99.75", text)
+        with open("ABC-60d.json", "w") as fh:
+            json.dump(history_chart("ABC"), fh)
+        code, text, err = self.run_cli("replay", "--offline", "ABC-60d.json", "--replays", "500", *t)
+        self.assertEqual(code, 0, err)
+        self.assertIn("500 replays of the rest of the session to 3:10 PM", text)
+        self.assertIn("History: the same rule on each of those 30 real sessions", text)
+        self.assertTrue(os.path.exists("trader/india/timemachine.json"))
         code, text, err = self.run_cli("size", *t)
         self.assertEqual(code, 0, err)
         self.assertIn("Size: 738 shares of ABC", text)
