@@ -6,8 +6,7 @@ description: >-
   the other skills wrote. Each market gets one plain card in this order: the
   stock, buy at, stop-loss, target, close-out time, the Time Machine odds,
   shares, charges, max loss at the stop, the risk check, and the order to type
-  into the broker's app, with the scan's other matches folded underneath. A
-  step that has not run says so with the command that runs it; an old plan is
+  into the broker's app. A step that has not run says so with the command that runs it; an old plan is
   marked OLD. Below each card, a table of every option from the scan with its
   buy, stop-loss, target, shares, charges, max loss and odds, in breakout
   order and never ranked. No network, never places an order, never picks a
