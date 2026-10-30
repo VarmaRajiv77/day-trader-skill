@@ -26,8 +26,9 @@ US = {
     "orders": {"orders": [{"symbol": "TSLA", "side": "buy", "qty": "8", "stop_loss_stop_price": "358.32",
                            "take_profit_limit_price": "370.04"}]},
     "risk": {"date": "2026-10-19", "results": [{"symbol": "TSLA", "verdict": "PASS", "reasons": []}]},
-    "watchlist": {"as_of": "2026-10-19 10:15 ET", "hits": [{"symbol": "AMC", "price": 2.97, "at": "9:50 AM"},
-                                                          {"symbol": "TSLA", "price": 364.18, "at": "10:15 AM"}]},
+    "watchlist": {"mode": "orb", "as_of": "2026-10-19 10:15 ET", "hits": [
+        {"symbol": "AMC", "price": 2.97, "at": "9:50 AM", "or_high": 2.96, "or_low": 2.90, "setups": ["orb"]},
+        {"symbol": "TSLA", "price": 364.18, "at": "10:15 AM", "or_high": 362.18, "or_low": 354.47, "setups": ["orb"]}]},
 }
 
 # a made-up NSE trade as trader-india writes it
@@ -94,7 +95,7 @@ class Page(unittest.TestCase):
             self.assertIn(want, ind)
         self.assertIn("PAPER TRADE", p)
         self.assertIn("Not picks", p)
-        self.assertIn("2 charts matched a rule", p)
+        self.assertIn("All options from the scan: 2 charts", p)
 
     def test_missing_steps_say_how(self):
         p = self.page(us={"plan": US["plan"]}, india={})
@@ -114,6 +115,61 @@ class Page(unittest.TestCase):
     def test_notes_are_escaped(self):
         p = dash.render(NOW, [("us", US)], notes={"us": "Replay <b>"})
         self.assertIn("Replay &lt;b&gt;", p)
+
+
+class Options(unittest.TestCase):
+    def test_every_breakout_gets_levels_and_shares(self):
+        opt = dash.options(US, "us", dict(dash.US_LIMITS))
+        self.assertEqual([r["symbol"] for r in opt["rows"]], ["AMC", "TSLA"])   # the scan's order, not ranked
+        t = opt["rows"][1]
+        # stop at the range's midpoint (358.325 down to the cent), target 2R, $50 max loss -> 8 shares
+        self.assertEqual((t["entry"], t["stop"], t["risk_share"], t["target"]), (364.18, 358.32, 5.86, 375.9))
+        self.assertEqual((t["qty"], t["max_loss"], t["charges"]), (8, 46.88, None))
+        amc = opt["rows"][0]
+        self.assertEqual((amc["stop"], amc["target"]), (2.93, 3.05))
+        self.assertEqual(amc["qty"], 1250)   # capped by 50 / 0.04 = 1,250 shares
+        self.assertEqual(opt["date"], "2026-10-19")
+
+    def test_india_uses_the_tick_and_charges(self):
+        d = {"watchlist": {"mode": "orb", "as_of": "2026-10-19 09:46 IST", "hits": [
+            {"symbol": "ABC", "price": 101.0, "at": "9:40 AM", "or_high": 100.5, "or_low": 99.0}]}}
+        r = dash.options(d, "india", dict(dash.INDIA_LIMITS))["rows"][0]
+        self.assertEqual((r["stop"], r["target"], r["qty"]), (99.75, 103.5, 738))
+        self.assertEqual(r["charges"], round(40 + 0.0005 * 101.0 * 738, 2))
+        self.assertLessEqual(r["max_loss"], 1000)
+
+    def test_daily_hits_have_no_levels(self):
+        d = {"watchlist": {"mode": "daily", "as_of": "2026-10-16 close",
+                           "hits": [{"symbol": "KO", "price": 93.9, "setups": ["breakout_20d"]}]}}
+        r = dash.options(d, "us", dict(dash.US_LIMITS))["rows"][0]
+        self.assertNotIn("entry", r)
+        self.assertIn("no breakout levels", r["note"])
+
+    def test_a_stop_too_far_is_zero_shares(self):
+        d = {"watchlist": {"as_of": "2026-10-19 10:15 ET", "hits": [
+            {"symbol": "BIG", "price": 1300.0, "at": "10:00 AM", "or_high": 1290.0, "or_low": 1100.0}]}}
+        r = dash.options(d, "us", dict(dash.US_LIMITS))["rows"][0]
+        self.assertEqual(r["qty"], 0)
+        self.assertIn("too far", r["note"])
+
+    def test_odds_match_only_the_same_plan(self):
+        rep = {"plan": {"date": "2026-10-19", "entry": 364.18}, "verdict": "Close to break-even",
+               "mc": {"p_target": 0.2, "p_stop": 0.4, "p_neither": 0.4}}
+        d = dict(US, replays={"TSLA": rep, "AMC": dict(rep, plan={"date": "2026-10-18", "entry": 2.97})})
+        rows = dash.options(d, "us", dict(dash.US_LIMITS))["rows"]
+        self.assertEqual(rows[1]["odds"]["target"], 0.2)
+        self.assertIsNone(rows[0]["odds"])
+
+    def test_table_and_commands(self):
+        p = dash.render(NOW, [("us", US)])
+        self.assertIn("All options from the scan: 2 charts", p)
+        self.assertIn("Not ranked and not picks", p)
+        self.assertIn("375.90", p)
+        self.assertIn('not run', p)
+        lines = dash.replay_commands(dash.options(US, "us", dict(dash.US_LIMITS)), "tm.py")
+        self.assertEqual(len(lines), 2)
+        self.assertIn('run --symbol TSLA --date 2026-10-19 --entry 364.18 --stop 358.32 --target 375.90 '
+                      '--entry-time "10:15 AM" --stop-rule or_mid --write trader/replays/TSLA.json', lines[1])
 
 
 class Cli(unittest.TestCase):
@@ -137,6 +193,12 @@ class Cli(unittest.TestCase):
                 page = fh.read()
             self.assertIn("TSLA", page)
             self.assertIn("No trade planned yet", page)   # a broken India file reads as not run
+            with open("trader/options.json") as fh:
+                self.assertEqual(len(json.load(fh)["rows"]), 2)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                dash.main(["--replay-commands", "--now", "2026-10-19T14:16:00Z"])
+            self.assertIn("--write trader/replays/AMC.json", out.getvalue())
         finally:
             os.chdir(cwd)
             shutil.rmtree(d)

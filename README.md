@@ -143,8 +143,12 @@ universe -> daily (before 9:15) -> orb (after 9:35) -> entry -> plan -> replay -
 - A running total loss limit (Rs 5,000 by default) blocks new entries once
   your closed trades have lost that much. Log each result with
   `ticket result`.
-- It never places an order. The ticket is the order to type into your
-  broker's app (INDmoney, Zerodha, Groww, any), and paper is the default.
+- By default it never places an order: the ticket is the order to type into
+  your broker's app (INDmoney, Zerodha, Groww, any), and paper is the default.
+- INDmoney users can switch on `india.py broker` (INDstocks API): it sends
+  the one checked order, a limit buy with its stop-loss and target legs, only
+  after your yes. It needs your INDstocks token in `INDSTOCKS_TOKEN` and a
+  static IP registered with INDstocks; real orders also need `"paper": false`.
 - NSE's 2026 holidays are built in. From 2027, check NSE's circular.
 
 ```bash
@@ -164,8 +168,10 @@ python3 trader-india/india.py check && python3 trader-india/india.py ticket show
 After any run, in either market, `/trader-dashboard` writes
 `trader/dashboard.html`: one card a market with the buy price, the stop-loss,
 the target, the close-out time, the Time Machine odds, the shares, the
-charges, the max loss and the risk check, then the order to type. It reads
-the files the other skills wrote and fetches nothing.
+charges, the max loss and the risk check, then the order to type. Under each
+card, a table lists every breakout from the scan with the same levels and
+its odds, in breakout order, never ranked. It reads the files the other
+skills wrote and fetches nothing.
 
 ```bash
 python3 trader-dashboard/dashboard.py          # both markets -> trader/dashboard.html

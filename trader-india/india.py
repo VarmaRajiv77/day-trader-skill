@@ -8,12 +8,17 @@
     python3 india.py entry RELIANCE                    # waiting / triggered / expired -> entry.json
     python3 india.py plan --stop or-mid --target 2R    # stop and target -> plan.json
     python3 india.py replay                            # the Time Machine -> timemachine.json
+    python3 india.py replay-all                        # ... on every breakout in the scan -> replays/
     python3 india.py size                              # shares for your rupee limits -> orders.json
     python3 india.py check                             # PASS / BLOCK -> state/risk.json
     python3 india.py ticket show                       # the order to type into your broker's app
     python3 india.py ticket placed --yes               # you placed it: log it for the day limits
     python3 india.py ticket result RELIANCE --pnl -480 # how it ended: counts toward the total limit
     python3 india.py status                            # today's trades, today's risk, the running total
+    python3 india.py broker setup                      # INDstocks: check the token (INDSTOCKS_TOKEN)
+    python3 india.py broker preview                    # the exact order it would send
+    python3 india.py broker send --reply "yes"         # send it, after the user's yes (paper sends nothing)
+    python3 india.py broker close RELIANCE --reply "yes"  # cancel the legs, sell what is open
 
 Everything lives in trader/india/ so it never mixes with the US files in trader/.
 
@@ -63,7 +68,14 @@ size      Whole shares inside four limits, the smallest wins: max loss per
           cap, the max order and cash after your buffer. No margin.
 check     PASS or BLOCK against your rules, and today's log (state/trades.json).
 ticket    The order in plain words, READY only if THIS order passed today.
-          This tool never places an order: you type it into your broker's app.
+          You type it into your broker's app yourself, or:
+broker    INDstocks (INDmoney's broker API, api.indstocks.com), off unless
+          "broker": "indstocks". send places ONE smart order (a LIMIT buy at
+          the plan's entry, a stop-loss leg and a target leg, INTRADAY) for an
+          order that passed check today and passes again now, never twice,
+          only with "paper": false and the user's yes in --reply. The token
+          comes from INDSTOCKS_TOKEN; orders need a static IP registered with
+          INDstocks. A send that errors is never retried: check broker orders.
 
 --now "2026-10-29 10:15" pins the clock (India time; ...Z for UTC).
 --offline PATH reads saved files instead of the network.
@@ -151,6 +163,10 @@ DEFAULTS = {
     "brokerage_per_order_inr": 20,
     "charges_pct_round_trip": 0.05,
     "paper": True,
+    "broker": "manual",
+    "indstocks_product": "INTRADAY",
+    "sl_limit_buffer_pct": 0.5,
+    "tgt_limit_ticks": 1,
     "blocked": [],
     "allow_margin": False,
     "allow_short": False,
@@ -859,7 +875,7 @@ def compute_plan(entry, stop_rule, stop_param, target_rule, target_param, tick, 
 def size_order(plan, cfg):
     """Whole shares inside four limits. -> (order or None, limits [(name, how, qty)], why)."""
     entry, stop, target = float(plan["entry"]), float(plan["stop"]), float(plan["target"])
-    risk = entry - stop
+    risk = entry - stop_fill(stop, cfg)   # with INDstocks, the stop leg may fill down at its limit
     budget = float(cfg["budget_inr"])
     fixed = 2 * float(cfg["brokerage_per_order_inr"])
     pct = float(cfg["charges_pct_round_trip"]) / 100.0
@@ -946,7 +962,7 @@ def check_order(order, cfg, log, now_utc):
         reasons.append("stop: %s is not below the entry %s" % (_p(float(stop)), _p(entry)))
         risk = None
     else:
-        risk = entry - float(stop)
+        risk = entry - stop_fill(float(stop), cfg)
     est = charges(cfg, entry, qty)
     if risk is not None:
         loss = qty * risk + est
@@ -1191,6 +1207,354 @@ def time_machine(series, plan, now_utc, replays=10000, seed=19, window=2, until=
             "note": ("A simulation built from %s's own last %d full sessions. It is not a prediction: results, "
                      "news, circuits and halts can do things those sessions never did. Charges are not in the "
                      "R figures. Same seed, same numbers." % (plan["symbol"], len(sessions)))}
+
+
+# ---------------------------------------------------------------- INDstocks (INDmoney's broker API)
+
+INDSTOCKS_URL = "https://api.indstocks.com"
+TOKEN_ENV = "INDSTOCKS_TOKEN"
+YES_WORDS = ("yes", "y", "haan", "ha", "han")
+OPEN_STATES = ("QUEUED", "O-PENDING", "SL-PENDING", "PROCESSING", "INITIATED", "PENDING", "MODIFIED",
+               "CREATED", "PARTIALLY FILLED")
+
+
+def sl_limit(stop, cfg):
+    """The stop-loss leg's limit price: sl_limit_buffer_pct under the trigger, on the tick, and
+    at least one tick under it (INDstocks wants the limit strictly below the trigger on a BUY)."""
+    tick = float(cfg["tick_size"])
+    lim = to_tick(float(stop) * (1 - float(cfg["sl_limit_buffer_pct"]) / 100.0), tick)
+    return min(lim, to_tick(float(stop) - tick, tick))
+
+
+def stop_fill(stop, cfg):
+    """The worst price the stop is planned to fill at: the stop leg's limit when orders go to
+    INDstocks (a stop-loss limit order), else the stop itself."""
+    return sl_limit(stop, cfg) if cfg.get("broker") == "indstocks" else float(stop)
+
+
+def _http(method, url, headers, body, timeout):
+    """One HTTP call -> (status, text). Swapped out by the tests."""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, e.read().decode("utf-8", "replace")
+        finally:
+            e.close()
+
+
+HTTP = _http
+
+
+def ind_call(method, path, token, body=None, query=None, raw=False, timeout=20):
+    """One INDstocks call. Never retried here: a place-order that times out may still have
+    gone through, so the caller checks the order book instead of resending."""
+    if not token:
+        raise IndiaError("no INDstocks access token: set the %s environment variable (never paste it into the "
+                         "chat). Generate it at indstocks.com/app/api-trading/access-tokens" % TOKEN_ENV)
+    url = INDSTOCKS_URL + path + (("?" + urllib.parse.urlencode(query)) if query else "")
+    headers = {"Authorization": token, "Accept": "application/json", "User-Agent": UA}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    try:
+        status, text = HTTP(method, url, headers, body, timeout)
+    except (urllib.error.URLError, OSError) as e:
+        raise IndiaError("could not reach INDstocks (%s)" % getattr(e, "reason", e))
+    if raw and 200 <= status < 300:
+        return text
+    try:
+        doc = json.loads(text) if text.strip() else {}
+    except ValueError:
+        doc = {}
+    if not 200 <= status < 300 or (isinstance(doc, dict) and doc.get("status") == "error"):
+        why = ""
+        if isinstance(doc, dict):
+            why = " ".join(str(doc[k]) for k in ("error_type", "message", "debug_info", "error") if doc.get(k))
+        hint = ""
+        if status in (401, 403):
+            hint = (" (the token is invalid, expired or replaced: make a new one%s)"
+                    % ("; or this computer is not on the static IP registered with INDstocks" if method == "POST" else ""))
+        raise IndiaError("INDstocks answered HTTP %d for %s: %s%s" % (status, path, why or text[:200], hint))
+    return doc
+
+
+def parse_instruments(text):
+    """INDstocks' equity instruments CSV -> {NSE symbol: {security_id, name, tick, upper, lower}}.
+    NSE cash-market rows in series EQ only."""
+    rd = csv.reader(io.StringIO(text.lstrip("﻿")))
+    try:
+        hdr = [h.strip().upper() for h in next(rd)]
+    except StopIteration:
+        raise IndiaError("INDstocks sent an empty instruments file")
+    need = ("EXCH", "SECURITY_ID", "SYMBOL_NAME", "SERIES")
+    if any(k not in hdr for k in need):
+        raise IndiaError("the instruments file has no %s column" % ", ".join(k for k in need if k not in hdr))
+    ix = {k: hdr.index(k) for k in hdr}
+    out = {}
+    for row in rd:
+        def get(k):
+            i = ix.get(k)
+            return row[i].strip() if i is not None and i < len(row) else ""
+        if get("EXCH").upper() != "NSE" or get("SERIES").upper() != "EQ":
+            continue
+        sym = get("SYMBOL_NAME").upper()
+        if sym and get("SECURITY_ID"):
+            out[sym] = {"security_id": get("SECURITY_ID"), "name": get("CUSTOM_SYMBOL") or get("TRADING_SYMBOL"),
+                        "tick": _num(get("TICK_SIZE")), "upper": _num(get("UPPER_LIMIT")),
+                        "lower": _num(get("LOWER_LIMIT"))}
+    return out
+
+
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def instrument(sym, token, now_utc, cache=None):
+    """The INDstocks security_id for an NSE symbol, from the equity instruments file (cached for
+    the day in trader/india/state/). Read-only: needs the token, not the static IP."""
+    cache = cache or path("state/instruments-equity.csv")
+    today = to_ist(now_utc).date().isoformat()
+    text = None
+    if os.path.exists(cache):
+        mtime = datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=os.path.getmtime(cache))
+        if to_ist(mtime).date().isoformat() == today:
+            with open(cache, encoding="utf-8") as fh:
+                text = fh.read()
+    if text is None:
+        text = ind_call("GET", "/market/instruments", token, query={"source": "equity"}, raw=True, timeout=60)
+        d = os.path.dirname(cache)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(cache, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    inst = parse_instruments(text).get(sym.upper())
+    if not inst:
+        raise IndiaError("%s is not an NSE EQ stock in INDstocks' instruments file" % sym)
+    return inst
+
+
+def smart_order_body(order, inst, cfg):
+    """The /smart/order request for one planned buy: a LIMIT entry at the plan's price (no chasing),
+    a stop-loss leg (trigger at the stop, limit a little under it) and a target leg (trigger at the
+    target, limit one tick above, as INDstocks requires on a BUY), product INTRADAY. Pure."""
+    tick = float(cfg["tick_size"])
+    if inst.get("tick") and abs(inst["tick"] - tick) > 1e-9 and 0 < inst["tick"] < 1:   # a rupee tick, not paise
+        tick = float(inst["tick"])
+    entry, stop, target = to_tick(order["entry"], tick), to_tick(order["stop"], tick), to_tick(order["target"], tick)
+    body = {"txn_type": "BUY", "exchange": "NSE", "segment": "EQUITY", "product": cfg["indstocks_product"],
+            "order_type": "LIMIT", "validity": "DAY", "security_id": str(inst["security_id"]),
+            "qty": int(order["qty"]), "limit_price": entry,
+            "sl_trigger_price": stop, "sl_limit_price": min(sl_limit(stop, dict(cfg, tick_size=tick)), stop - tick),
+            "tgt_trigger_price": target,
+            "tgt_limit_price": round(target + int(cfg["tgt_limit_ticks"]) * tick, 2),
+            "algo_id": "99999", "remarks": ("trader-india/%s" % fingerprint(order))[:100]}
+    body["sl_limit_price"] = round(body["sl_limit_price"], 2)
+    if not (body["sl_limit_price"] < stop < entry < target < body["tgt_limit_price"]):
+        raise IndiaError("the prices are not in order (stop limit < stop < entry < target < target limit): "
+                         "%s" % json.dumps({k: body[k] for k in ("sl_limit_price", "sl_trigger_price", "limit_price",
+                                                                  "tgt_trigger_price", "tgt_limit_price")}))
+    if inst.get("upper") and entry > inst["upper"]:
+        raise IndiaError("the entry %s is above today's upper circuit %s: it cannot fill" % (_p(entry), _p(inst["upper"])))
+    if body["product"] not in ("INTRADAY", "CNC"):
+        raise IndiaError("indstocks_product must be INTRADAY or CNC")
+    return body
+
+
+def _broker_state(p):
+    return read_json(p, "broker log", required=False) or {"orders": []}
+
+
+def _is_yes(reply):
+    return str(reply or "").strip().lower().rstrip(".!") in YES_WORDS
+
+
+def cmd_broker(a):
+    now = parse_now(a.now)
+    cfg = read_config(a.config)
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    day = to_ist(now).date().isoformat()
+    state_path = path("state/broker.json")
+    act = a.action
+
+    if act == "setup":
+        print("INDstocks setup, once:")
+        print("  1. indstocks.com/app/api-trading/access-tokens: generate an access token (valid 24 hours).")
+        print("  2. Same page: register your computer's STATIC IP. Orders are refused from any other address,")
+        print("     and the IP can change only once a week (NSE rule). Read-only calls work without it.")
+        print("  3. In your terminal, not in the chat: export %s=<the token>" % TOKEN_ENV)
+        print('  4. In trader/india/config.json: "broker": "indstocks". Leave "paper": true until you mean it.')
+        print("Now %s: broker %s, paper %s, product %s, stop-loss limit %g%% under the stop."
+              % ("token found" if token else "no token in %s" % TOKEN_ENV, cfg.get("broker"),
+                 "on" if cfg.get("paper", True) else "OFF", cfg["indstocks_product"], cfg["sl_limit_buffer_pct"]))
+        if not token:
+            return 1
+        prof = ind_call("GET", "/user/profile", token).get("data") or {}
+        funds = ind_call("GET", "/funds", token).get("data") or {}
+        print("Token works: account %s, NSE %s. Intraday balance %s."
+              % (prof.get("user_id") or "?", "enabled" if prof.get("is_nse_onboarded") else "NOT enabled",
+                 rupees(float((funds.get("detailed_avl_balance") or {}).get("eq_mis") or 0))))
+        return 0
+
+    if act in ("orders", "positions"):
+        if act == "orders":
+            rows = ind_call("GET", "/order-book", token).get("data") or []
+            mine = [r for r in rows if str(r.get("remarks") or "").startswith("trader-india/")] if not a.all else rows
+            print("INDstocks order book today: %d order%s%s." % (len(mine), "" if len(mine) == 1 else "s",
+                                                                 "" if a.all else " placed by trader-india (--all for every one)"))
+            for r in mine:
+                print("  %-14s %-4s %-12s %4s @ %-8s %-8s %s%s"
+                      % (r.get("id"), r.get("txn_type"), r.get("name") or r.get("security_id"), r.get("requested_qty"),
+                         r.get("requested_price") or r.get("sl_trigger_price") or "-", r.get("order_type"), r.get("status"),
+                         (" (" + r["extra_info"] + ")") if r.get("extra_info") else ""))
+        else:
+            rows = ind_call("GET", "/portfolio/positions", token,
+                            query={"segment": "equity", "product": cfg["indstocks_product"].lower()}).get("data") or []
+            print("INDstocks %s equity positions: %d." % (cfg["indstocks_product"].lower(), len(rows)))
+            for r in rows:
+                print("  %-12s net %s, bought %s at %s, sold %s at %s, realized %s"
+                      % (r.get("symbol") or r.get("security_id"), r.get("net_qty"), r.get("buy_qty"), r.get("buy_avg"),
+                         r.get("sell_qty"), r.get("sell_avg"), r.get("realized_profit")))
+        return 0
+
+    # everything below can move money: the switches, then the user's own yes
+    if cfg.get("broker") != "indstocks":
+        raise IndiaError('the broker is not INDstocks: set "broker": "indstocks" in %s first (india.py broker setup)'
+                         % a.config)
+    live = not cfg.get("paper", True)
+
+    if act in ("preview", "send"):
+        doc = read_json(a.orders, "orders")
+        risk = read_json(a.state, "risk", required=False) or {}
+        log = read_json(a.trades, "trades", required=False) or {"trades": []}
+        passed = {r["fingerprint"] for r in risk.get("results", []) if r.get("verdict") == "PASS"} \
+            if risk.get("date") == day else set()
+        orders = doc.get("orders") or []
+        if not orders:
+            raise IndiaError("%s has no orders" % a.orders)
+        o = orders[0]
+        fp = fingerprint(o)
+        if fp not in passed:
+            raise IndiaError("%s did not pass `india.py check` today: nothing is sent" % o["symbol"])
+        verdict, reasons, _ = check_order(o, cfg, log, now)   # again, now: the window or the day may have moved on
+        if verdict != "PASS":
+            raise IndiaError("the risk check fails now: %s" % "; ".join(reasons))
+        bstate = _broker_state(state_path)
+        if any(r.get("fingerprint") == fp and r.get("date") == day and r.get("status") in ("sent", "unknown")
+               for r in bstate["orders"]):
+            raise IndiaError("this exact order was already sent today: `india.py broker orders` shows it")
+        inst = instrument(o["symbol"], token, now)
+        body = smart_order_body(o, inst, cfg)
+        worst = round(o["qty"] * (o["entry"] - body["sl_limit_price"]) + charges(cfg, o["entry"], o["qty"]), 2)
+        print("%s order for INDstocks (POST /smart/order), %s:"
+              % ("LIVE" if live else "PAPER", "would be sent" if act == "preview" or not live else "sending"))
+        print("  BUY %d %s (security_id %s) INTRADAY, limit %s" % (body["qty"], o["symbol"], body["security_id"],
+                                                                 _p(body["limit_price"])))
+        print("  stop-loss leg: trigger %s, limit %s   target leg: trigger %s, limit %s"
+              % (_p(body["sl_trigger_price"]), _p(body["sl_limit_price"]), _p(body["tgt_trigger_price"]),
+                 _p(body["tgt_limit_price"])))
+        print("  Worst planned loss, the stop leg filling at its limit, with charges: %s (your max %s)."
+              % (rupees(worst), rupees(float(cfg["max_loss_per_trade_inr"]))))
+        print("  " + json.dumps(body))
+        if worst > float(cfg["max_loss_per_trade_inr"]) + 0.005:
+            raise IndiaError("the worst planned loss %s is over your %s max loss a trade: re-run india.py size"
+                             % (rupees(worst), rupees(float(cfg["max_loss_per_trade_inr"]))))
+        if act == "preview":
+            print("Nothing sent. To send it the user must say yes to this exact order, then: "
+                  "india.py broker send --reply \"<their words>\"")
+            return 0
+        if not _is_yes(a.reply):
+            raise IndiaError('send needs the user\'s own yes for this order: --reply "yes" (got %r)' % (a.reply or ""))
+        if not live:
+            print('Paper is on ("paper": true): NOTHING was sent to INDstocks. Write the trade down, or set '
+                  '"paper": false yourself when you mean real money.')
+            return 0
+        rec = {"at": to_ist(now).strftime("%Y-%m-%d %H:%M IST"), "date": day, "symbol": o["symbol"], "fingerprint": fp,
+               "reply": a.reply, "body": body}
+        try:
+            res = ind_call("POST", "/smart/order", token, body=body)
+        except IndiaError as e:
+            rec.update(status="unknown" if "could not reach" in str(e) else "rejected", error=str(e))
+            bstate["orders"].append(rec)
+            write_json(state_path, bstate)
+            if rec["status"] == "unknown":
+                raise IndiaError("%s. It MAY have gone through: do not resend. Run `india.py broker orders` first." % e)
+            raise
+        od = ((res.get("data") or {}).get("order_data") or [{}])[0]
+        child = od.get("child_order_details") or {}
+        rec.update(status="sent", order_id=od.get("order_id"), order_status=od.get("order_status"),
+                   child_order_id=child.get("order_id") or od.get("child_order_id"))
+        bstate["orders"].append(rec)
+        write_json(state_path, bstate)
+        log["trades"].append({"date": day, "symbol": o["symbol"], "qty": o["qty"], "entry": o["entry"], "stop": o["stop"],
+                              "target": o["target"], "max_loss_inr": max(o["max_loss_inr"], worst), "paper": False,
+                              "fingerprint": fp, "pnl_inr": None, "placed_at": rec["at"],
+                              "broker_order_id": rec["order_id"], "child_order_id": rec["child_order_id"]})
+        write_json(a.trades, log)
+        print("Sent. Order %s (%s); stop-loss and target leg %s. The legs wake only once the buy fills."
+              % (rec["order_id"], rec["order_status"], rec["child_order_id"] or "(see broker orders)"))
+        print("Check it: india.py broker orders. Close out by %s: india.py broker close %s --reply yes"
+              % (cfg["flat_by"], o["symbol"]))
+        return 0
+
+    if not _is_yes(a.reply):
+        raise IndiaError('%s needs the user\'s own yes: --reply "yes"' % act)
+    if not live:
+        print('Paper is on ("paper": true): nothing sent to INDstocks.')
+        return 0
+
+    if act == "cancel":
+        if not a.target:
+            raise IndiaError("broker cancel wants an order id, like GTT-2914581 or EQ-93586788")
+        smart = a.target.startswith("GTT-")
+        if not smart:   # a smart order's parent carries legs; a plain /order does not
+            for r in ind_call("GET", "/order-book", token).get("data") or []:
+                if r.get("id") == a.target:
+                    smart = bool(r.get("child_order_id") or r.get("sl_trigger_price") or r.get("tgt_trigger_price"))
+        ind_call("POST", "/smart/order/cancel" if smart else "/order/cancel", token,
+                 body={"order_id": a.target, "segment": "EQUITY"})
+        print("Cancelled %s." % a.target)
+        return 0
+
+    if act == "close":
+        if not a.target:
+            raise IndiaError("broker close wants the NSE symbol")
+        sym = from_yahoo(a.target)
+        inst = instrument(sym, token, now)
+        sid = str(inst["security_id"])
+        legs = [r for r in ind_call("GET", "/order-book", token).get("data") or []
+                if str(r.get("security_id")) == sid and str(r.get("id") or "").startswith("GTT-")
+                and str(r.get("status") or "").upper() in OPEN_STATES]
+        for r in legs:   # first the stop/target legs, so they cannot fire after the position is gone
+            ind_call("POST", "/smart/order/cancel", token, body={"order_id": r["id"], "segment": "EQUITY"})
+            print("Cancelled the waiting leg %s." % r["id"])
+        pos = [r for r in ind_call("GET", "/portfolio/positions", token,
+                                   query={"segment": "equity", "product": cfg["indstocks_product"].lower()}).get("data") or []
+               if str(r.get("security_id")) == sid]
+        qty = int(sum(float(r.get("net_qty") or 0) for r in pos))
+        if qty <= 0:
+            print("No open %s position in %s: nothing to sell." % (cfg["indstocks_product"].lower(), sym))
+            return 0
+        ltp = float(((ind_call("GET", "/market/quotes/ltp", token, query={"scrip-codes": "NSE_" + sid}).get("data") or {})
+                     .get("NSE_" + sid) or {}).get("live_price") or 0)
+        if ltp <= 0:
+            raise IndiaError("no live price for %s: sell it in the INDmoney app" % sym)
+        limit = to_tick(ltp * (1 - float(cfg["sl_limit_buffer_pct"]) / 100.0), float(cfg["tick_size"]))
+        body = {"txn_type": "SELL", "exchange": "NSE", "segment": "EQUITY", "product": cfg["indstocks_product"],
+                "order_type": "LIMIT", "validity": "DAY", "security_id": sid, "qty": qty, "limit_price": limit,
+                "algo_id": "99999", "remarks": "trader-india/close"}
+        res = ind_call("POST", "/order", token, body=body)
+        print("Sell %d %s at a limit of %s (last price %s): order %s %s."
+              % (qty, sym, _p(limit), _p(ltp), (res.get("data") or {}).get("order_id"),
+                 (res.get("data") or {}).get("order_status")))
+        print("When it fills, log the result: india.py ticket result %s --pnl RUPEES" % sym)
+        return 0
+    raise IndiaError("unknown broker action %s" % act)
 
 
 # ---------------------------------------------------------------- fetching
@@ -1570,6 +1934,55 @@ def cmd_replay(a):
     return 0
 
 
+def cmd_replay_all(a):
+    """The Time Machine on every opening-range breakout in the watchlist, one file each."""
+    now = parse_now(a.now)
+    cfg = read_config(a.config)
+    wl = read_json(a.watchlist, "watchlist")
+    if wl.get("mode") != "orb":
+        raise IndiaError("replay-all needs an opening-range scan (india.py orb): a daily scan has no entry levels yet")
+    date = str(wl.get("as_of") or "")[:10]
+    hits = [h for h in wl.get("hits") or [] if h.get("or_high") is not None]
+    if a.limit:
+        hits = hits[:a.limit]
+    if not hits:
+        raise IndiaError("the scan in %s has no breakouts to replay" % a.watchlist)
+    tick = float(cfg["tick_size"])
+    trule, tparam = parse_target(a.target)
+    done, failed = [], {}
+    for k, h in enumerate(hits):
+        sym = h["symbol"]
+        try:
+            p = compute_plan(h["price"], "or-mid", None, trule, tparam, tick, h["or_high"], h["or_low"])
+            plan = dict(p, symbol=sym, date=date, setup="orb", stop_rule="or-mid", entry_time=h.get("at"),
+                        entry_bar=h.get("bar_index"), flat_by=cfg["flat_by"], tick_size=tick,
+                        opening_range={"high": h["or_high"], "low": h["or_low"],
+                                       "minutes": int(wl.get("or_minutes") or 15)})
+            if k and not a.offline and a.pause:
+                SLEEP(a.pause)
+            series = load_one(sym, a.offline, "60d")
+            doc = time_machine(series, plan, now, a.replays, a.seed, 2, None)
+        except IndiaError as e:
+            failed[sym] = str(e)
+            continue
+        write_json(os.path.join(a.out_dir, sym + ".json"), doc)
+        done.append((sym, doc))
+    if a.json:
+        print(json.dumps({"done": [s for s, _ in done], "failed": failed}, indent=2))
+        return 0 if done else 1
+    print("Time Machine on %d of %d breakouts from the %s scan (%s replays each, seed %d):"
+          % (len(done), len(hits), date, "{:,}".format(a.replays), a.seed))
+    for sym, doc in done:
+        mc = doc["mc"]
+        print("  %-12s target first %5.1f %%  stop first %5.1f %%  neither %5.1f %%  %s"
+              % (sym, 100 * mc["p_target"], 100 * mc["p_stop"], 100 * mc["p_neither"], doc["verdict"].split(":")[0]))
+    for sym, why in failed.items():
+        print("  %-12s not run: %s" % (sym, why))
+    print("Listed in the scan's order, not ranked. Simulations, not predictions. Wrote %s/. "
+          "Next: the dashboard shows them in its options table." % a.out_dir)
+    return 0 if done else 1
+
+
 def cmd_size(a):
     cfg = read_config(a.config)
     plan = read_json(a.plan, "plan")
@@ -1681,7 +2094,8 @@ def cmd_ticket(a):
             print("ORDER %d of %d" % (i, len(orders)))
             for ln in _ticket_lines(o, cfg, fingerprint(o) in passed):
                 print(ln)
-        print("This tool never places an order. You type it into your broker's app yourself.")
+        print("This step never places an order. Type it into your broker's app, or, with INDstocks on, "
+              "`india.py broker preview`.")
         return 0 if orders and all(fingerprint(o) in passed for o in orders) else 1
     # placed
     if not a.yes:
@@ -1802,6 +2216,17 @@ def main(argv=None):
     p.add_argument("--out", default=path("timemachine.json"))
     p.add_argument("--no-write", action="store_true")
 
+    p = sub.add_parser("replay-all", help="the Time Machine on every breakout in the scan")
+    base(p)
+    p.add_argument("--watchlist", default=path("watchlist.json"))
+    p.add_argument("--offline", metavar="PATH", help="a folder of <SYMBOL>.json 60-day charts, or one bundle file")
+    p.add_argument("--target", default="2R")
+    p.add_argument("--limit", type=int, help="only the first N breakouts")
+    p.add_argument("--replays", type=int, default=10000)
+    p.add_argument("--seed", type=int, default=19)
+    p.add_argument("--pause", type=float, default=PAUSE)
+    p.add_argument("--out-dir", default=path("replays"))
+
     p = sub.add_parser("size", help="shares for your rupee limits -> trader/india/orders.json")
     base(p)
     p.add_argument("--plan", default=path("plan.json"))
@@ -1825,6 +2250,16 @@ def main(argv=None):
     p.add_argument("--trades", default=path("state/trades.json"))
     p.add_argument("--state", default=path("state/risk.json"))
 
+    p = sub.add_parser("broker", help="INDstocks (INDmoney's broker API): setup, preview, send, orders, close")
+    base(p)
+    p.add_argument("action", choices=["setup", "preview", "send", "orders", "positions", "cancel", "close"])
+    p.add_argument("target", nargs="?", help="cancel: the order id; close: the NSE symbol")
+    p.add_argument("--reply", help="the user's own words saying yes to this exact order")
+    p.add_argument("--all", action="store_true", help="orders: every order today, not only trader-india's")
+    p.add_argument("--orders", default=path("orders.json"))
+    p.add_argument("--trades", default=path("state/trades.json"))
+    p.add_argument("--state", default=path("state/risk.json"))
+
     p = sub.add_parser("status", help="today's trades and the running total")
     base(p)
     p.add_argument("--trades", default=path("state/trades.json"))
@@ -1835,7 +2270,7 @@ def main(argv=None):
         return 1
     try:
         return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb, "entry": cmd_entry,
-                "plan": cmd_plan, "replay": cmd_replay, "size": cmd_size, "check": cmd_check, "ticket": cmd_ticket,
+                "plan": cmd_plan, "replay": cmd_replay, "replay-all": cmd_replay_all, "size": cmd_size, "check": cmd_check, "ticket": cmd_ticket, "broker": cmd_broker,
                 "status": cmd_status}[a.cmd](a)
     except IndiaError as e:
         print("india.py: %s" % e, file=sys.stderr)

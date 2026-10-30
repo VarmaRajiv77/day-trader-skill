@@ -11,9 +11,10 @@ description: >-
   every past day the rule fired, sizes the trade to
   your rupee limits with brokerage and taxes counted, checks it against your
   rules (max loss a trade, a day, and a running total loss limit), and prints
-  the order to type into your broker's app (INDmoney, Zerodha, Groww, any).
-  Knows NSE hours and the 2026 holidays. Never places an order; paper by
-  default. Use when the user says "Indian stocks", "NSE", "BSE", "Nifty",
+  the order to type into your broker's app (INDmoney, Zerodha, Groww, any),
+  or, with INDmoney's INDstocks API switched on, sends that one order (a limit
+  buy with its stop-loss and target legs) only after the user's own yes.
+  Knows NSE hours and the 2026 holidays. Paper by default. Use when the user says "Indian stocks", "NSE", "BSE", "Nifty",
   "Sensex", "rupees", "INDmoney", "Zerodha", "Groww", "intraday", "scan NSE",
   "RELIANCE", "TCS", "INFY", "I have 1 lakh", "what are the odds" on an
   Indian stock, or names any NSE symbol.
@@ -26,8 +27,10 @@ the same method as the US skills (scanner, entry, exit, budget, risk, broker),
 plus the Time Machine, rebuilt for India: NSE's stock list, NSE's hours (9:15 AM to 3:30 PM IST, no
 daylight saving) and holidays, the NSE tick, rupee limits, and Indian charges.
 
-It never places an order. It ends with a ticket you type into your broker's
-app yourself. Most people who day trade lose money; this does not change that.
+By default it never places an order: it ends with a ticket you type into your
+broker's app yourself. With INDstocks (INDmoney's broker API) switched on, it
+can send that one checked order for you, only after you say yes to it. Most
+people who day trade lose money; this does not change that.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
@@ -39,6 +42,7 @@ python3 "${CLAUDE_SKILL_DIR}/india.py" orb                            # after 9:
 python3 "${CLAUDE_SKILL_DIR}/india.py" entry RELIANCE                 # waiting / triggered / expired -> entry.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" plan --stop or-mid --target 2R # -> plan.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" replay                         # the Time Machine: 10,000 replays -> timemachine.json
+python3 "${CLAUDE_SKILL_DIR}/india.py" replay-all                     # ... on every breakout in the scan -> replays/
 python3 "${CLAUDE_SKILL_DIR}/india.py" size                           # -> orders.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" check                          # PASS / BLOCK -> state/risk.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" ticket show                    # the order in plain words
@@ -109,6 +113,8 @@ of the budget a trade.
    `daily --watchlist trader/india/mylist.txt`. The Nifty 50 changes at the end
    of March and September: check niftyindices.com and edit the file.
 3. After 9:35 AM IST: `india.py orb` (or `orb --watchlist trader/india/watchlist.json`).
+   To see the odds of every breakout before the user picks: `india.py replay-all`
+   (one request a stock), then the dashboard's options table lists them all.
 4. The user picks one chart. Never pick for them. `india.py entry SYMBOL`
    until it says TRIGGERED (re-run every few minutes; it reads completed
    5-minute bars).
@@ -132,10 +138,55 @@ of the budget a trade.
    it, they type it into their broker's app themselves. Only after they say
    they placed that exact order: `ticket placed --yes`. When it ends:
    `ticket result SYMBOL --pnl RUPEES` (after charges, negative for a loss).
-10. `india.py status` any time: trades today, risk used, the running total.
-11. After every live step, if `/trader-dashboard` is installed, run its
+10. With INDstocks switched on (below), `india.py broker preview`, read it to the
+    user, and send only after their own yes: `india.py broker send --reply "<their words>"`.
+11. `india.py status` any time: trades today, risk used, the running total.
+12. After every live step, if `/trader-dashboard` is installed, run its
     `dashboard.py` so the user sees the trade on one card
     (`trader/dashboard.html`).
+
+## Sending orders through INDstocks (INDmoney)
+
+INDmoney's broker, INDstocks, has a trading API (docs: api-docs.indstocks.com).
+`india.py broker` uses it. Off by default (`"broker": "manual"`).
+
+The user sets it up once (`india.py broker setup` prints the steps and tests the token):
+
+1. Generate an access token at indstocks.com/app/api-trading/access-tokens
+   (valid 24 hours) and put it in the `INDSTOCKS_TOKEN` environment variable
+   in their own terminal. Never ask for it, never put it in the chat or a file.
+2. Register the computer's **static IP** on the same page. INDstocks refuses
+   orders from any other address (an NSE rule); the IP can change once a week.
+   Reading prices, positions and the order book works without it.
+3. `"broker": "indstocks"` in `trader/india/config.json`. Real orders also need
+   `"paper": false`, which only the user switches.
+
+What it sends: one `POST /smart/order` for the order `check` passed today:
+BUY, NSE, EQUITY, product `INTRADAY` (`indstocks_product`), a **LIMIT** at the
+plan's entry (it never chases the price), a stop-loss leg (trigger at the
+stop, limit `sl_limit_buffer_pct`, 0.5 %, under it) and a target leg (trigger
+at the target, limit one tick above, as INDstocks requires on a BUY). The legs
+wake only once the buy fills. Because the stop leg is a limit, `size` and
+`check` count the loss down to the stop leg's limit, so the max loss holds.
+
+| command | does |
+| --- | --- |
+| `broker setup` | prints the steps, tests the token, shows the intraday balance |
+| `broker preview` | the exact order and the worst planned loss, sends nothing |
+| `broker send --reply "yes"` | sends it: only for an order that passed `check` today and passes again now, only once, only with `"paper": false`, only after the user's yes |
+| `broker orders` | today's trader-india orders and their status (`--all` for every order) |
+| `broker positions` | open intraday positions |
+| `broker cancel ORDER_ID --reply "yes"` | cancels one order or leg |
+| `broker close SYMBOL --reply "yes"` | cancels the waiting stop/target legs first, then sells what is open at a limit just under the last price (use it at the flat-by time) |
+
+Rules for Claude:
+
+- `--reply` carries the user's own words, typed in the chat for this exact
+  order after they saw the preview. Never supply a yes yourself, never reuse an
+  earlier yes, never send for a trade the user has not seen.
+- If a send errors or times out, never send again: run `broker orders` and
+  report what INDstocks shows. The tool refuses a second send of the same order.
+- After the trade ends, log it: `ticket result SYMBOL --pnl RUPEES`.
 
 ## Data and limits
 
@@ -163,7 +214,9 @@ of the budget a trade.
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
 - Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- This skill never places an order. The user types every order into their broker's app, and only
-  after `check` passed that exact order today and the user said yes to it in the chat.
+- By default this skill never places an order: the user types it into their broker's app. With
+  `"broker": "indstocks"` and `"paper": false`, `broker send` places ONE order, only after `check`
+  passed that exact order today and again at send time, and only after the user's own yes in the chat.
+- The INDstocks token lives in the `INDSTOCKS_TOKEN` environment variable, never in the chat or a file.
 - No F&O, margin or short selling. Intraday leverage turns a small mistake into a large loss.
 - Day-trading profits in India are speculative business income for tax. Talk to a tax adviser.
