@@ -424,7 +424,7 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("PAPER TRADE", text)
         self.assertIn("READY: risk check passed today.", text)
         self.assertIn("SELL 738 ABC stop order, trigger 99.75", text)
-        self.assertIn("never places an order", text)
+        self.assertIn("This step never places an order", text)
         code, _, err = self.run_cli("ticket", "placed", *t)
         self.assertEqual(code, 1)
         self.assertIn("--yes", err)

@@ -143,8 +143,12 @@ universe -> daily (before 9:15) -> orb (after 9:35) -> entry -> plan -> replay -
 - A running total loss limit (Rs 5,000 by default) blocks new entries once
   your closed trades have lost that much. Log each result with
   `ticket result`.
-- It never places an order. The ticket is the order to type into your
-  broker's app (INDmoney, Zerodha, Groww, any), and paper is the default.
+- By default it never places an order: the ticket is the order to type into
+  your broker's app (INDmoney, Zerodha, Groww, any), and paper is the default.
+- INDmoney users can switch on `india.py broker` (INDstocks API): it sends
+  the one checked order, a limit buy with its stop-loss and target legs, only
+  after your yes. It needs your INDstocks token in `INDSTOCKS_TOKEN` and a
+  static IP registered with INDstocks; real orders also need `"paper": false`.
 - NSE's 2026 holidays are built in. From 2027, check NSE's circular.
 
 ```bash
