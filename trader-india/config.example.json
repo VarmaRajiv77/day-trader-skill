@@ -1,5 +1,5 @@
 {
-  "_note": "Rs 1,00,000 budget, Rs 1,000 max loss a trade, Rs 2,000 a day, stop for a review at Rs 5,000 lost in total. Charges are estimates: set brokerage_per_order_inr and charges_pct_round_trip from your broker's charges page and your contract notes. tick_size 0.05 suits most NSE stocks; check yours. broker: \"manual\" (you type every order) or \"indstocks\" (india.py broker sends it after your yes; needs INDSTOCKS_TOKEN and a static IP). sl_limit_buffer_pct: how far under the stop the stop-loss leg may fill.",
+  "_note": "Rs 1,00,000 budget, Rs 1,000 max loss a trade, Rs 2,000 a day, stop for a review at Rs 5,000 lost in total. Charges are estimates: set brokerage_per_order_inr and charges_pct_round_trip from your broker's charges page and your contract notes. tick_size 0.05 suits most NSE stocks; check yours. broker: \"manual\" (you type every order) or \"indstocks\" (india.py broker sends it after your yes; needs INDSTOCKS_TOKEN and a static IP). sl_limit_buffer_pct: how far under the stop the stop-loss leg may fill. nifty_etf: the fund india.py nifty trades for the Nifty 50.",
   "budget_inr": 100000,
   "cash_buffer_pct": 10,
   "max_position_pct": 75,
@@ -22,6 +22,7 @@
   "indstocks_product": "INTRADAY",
   "sl_limit_buffer_pct": 0.5,
   "tgt_limit_ticks": 1,
+  "nifty_etf": "NIFTYBEES",
   "blocked": [],
   "allow_margin": false,
   "allow_short": false

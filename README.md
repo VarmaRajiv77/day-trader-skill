@@ -156,6 +156,7 @@ cp trader-india/config.example.json trader/india/config.json             # then 
 python3 trader-india/india.py universe                                   # NSE EQUITY_L.csv
 python3 trader-india/india.py daily --symbols RELIANCE,TCS,INFY,HDFCBANK  # pre-market setups
 python3 trader-india/india.py daily --watchlist trader-india/nifty50.txt  # or the Nifty 50
+python3 trader-india/india.py nifty                                      # the Nifty desk, one command
 python3 trader-india/india.py orb                                        # breakouts of the 9:15 to 9:30 range
 python3 trader-india/india.py entry RELIANCE                             # waiting / triggered / expired
 python3 trader-india/india.py plan && python3 trader-india/india.py replay # stop, target, the odds

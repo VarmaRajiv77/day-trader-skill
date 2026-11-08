@@ -14,6 +14,7 @@
     python3 india.py ticket show                       # the order to type into your broker's app
     python3 india.py ticket placed --yes               # you placed it: log it for the day limits
     python3 india.py ticket result RELIANCE --pnl -480 # how it ended: counts toward the total limit
+    python3 india.py nifty                             # the Nifty desk: index levels, odds, NIFTYBEES trade
     python3 india.py status                            # today's trades, today's risk, the running total
     python3 india.py broker setup                      # INDstocks: check the token (INDSTOCKS_TOKEN)
     python3 india.py broker preview                    # the exact order it would send
@@ -167,6 +168,7 @@ DEFAULTS = {
     "indstocks_product": "INTRADAY",
     "sl_limit_buffer_pct": 0.5,
     "tgt_limit_ticks": 1,
+    "nifty_etf": "NIFTYBEES",
     "blocked": [],
     "allow_margin": False,
     "allow_short": False,
@@ -1557,6 +1559,209 @@ def cmd_broker(a):
     raise IndiaError("unknown broker action %s" % act)
 
 
+# ---------------------------------------------------------------- the Nifty desk
+
+NIFTY_PATH = "/v8/finance/chart/%5ENSEI?range=60d&interval=5m"   # the NIFTY 50 index on Yahoo
+NIFTY_NAME = "NIFTY 50"
+
+
+def session_closes(series, now_utc):
+    """[(date, close)] of every FULL session in the 5-minute data (all 75 bars), oldest first."""
+    days = tm_days(series, now_utc)
+    return [(d, days[d][SESSION_BARS - 1]["c"]) for d in sorted(days) if len(days[d]) == SESSION_BARS]
+
+
+def _phase(now_utc, cfg):
+    """'closed' (no session now), 'forming' (before the range is in) or 'open' (entries allowed)."""
+    now = to_ist(now_utc)
+    ok, why = trading_day(now.date())
+    t = now.time()
+    if not ok or t < OPEN or t >= CLOSE:
+        return "closed", why or ("before the 9:15 AM open" if t < OPEN else "after the 3:30 PM close")
+    if now < slot(now.date(), 4):   # the 9:15 to 9:30 range plus the first bar after it, closing 9:35
+        return "forming", "the 9:15 to 9:30 opening range is still forming; the first signal can come at 9:35 AM"
+    if t > parse_hhmm(cfg["no_entries_after"]):
+        return "late", "after %s, your last time for new entries" % cfg["no_entries_after"]
+    return "open", ""
+
+
+def nifty_side(series, name, now_utc, cfg, target_r, replays, seed=19):
+    """One instrument's half of the desk: where it is, the opening range and its signal, and, while
+    entries are allowed, a plan at the last price (stop at the range's midpoint) with its odds. Pure."""
+    now = to_ist(now_utc)
+    today = now.date().isoformat()
+    closes = session_closes(series, now_utc)
+    prev = [c for d, c in closes if d < today]
+    out = {"name": name, "prev_close": round(prev[-1], 2) if prev else None}
+    if len(closes) >= MIN_DAILY_BARS:
+        tags, nums = find_setups([c for _, c in closes])
+        out["daily"] = {"as_of": closes[-1][0], "setups": tags, "rsi": round(nums["rsi"], 1) if nums["rsi"] else None}
+    days = tm_days(series, now_utc)
+    bars_today = days.get(today) or {}
+    if bars_today:
+        b = [bars_today[k] for k in sorted(bars_today)]
+        last = b[-1]["c"]
+        out.update(date=today, last=round(last, 2), last_bar=clock_label(slot(now.date(), max(bars_today) + 1)),
+                   high=round(max(x["h"] for x in b), 2), low=round(min(x["l"] for x in b), 2))
+    elif closes:
+        last_day = sorted(days)[-1]
+        b = [days[last_day][k] for k in sorted(days[last_day])]
+        out.update(date=last_day, last=round(b[-1]["c"], 2), last_bar="the close",
+                   high=round(max(x["h"] for x in b), 2), low=round(min(x["l"] for x in b), 2))
+        prior = [c for d, c in closes if d < last_day]
+        out["prev_close"] = round(prior[-1], 2) if prior else None
+    if out.get("last") is not None and out.get("prev_close"):
+        out["change"] = round(out["last"] - out["prev_close"], 2)
+        out["change_pct"] = round((out["last"] / out["prev_close"] - 1) * 100, 2)
+    phase, why = _phase(now_utc, cfg)
+    out.update(phase=phase, phase_why=why)
+    if phase in ("open", "late"):
+        e = entry_status(series, now_utc, 15, parse_hhmm(cfg["no_entries_after"]))
+        out["signal"] = {k: e.get(k) for k in ("status", "entry", "entry_time", "pct_over", "line", "last", "away_pct", "why")}
+        rng = e.get("opening_range")
+        if rng:
+            out["opening_range"] = rng
+    if phase != "open" or not out.get("opening_range"):
+        return out
+    rng = out["opening_range"]
+    entry = out["last"]
+    try:
+        p = compute_plan(entry, "or-mid", None, "r", target_r, float(cfg["tick_size"]), rng["high"], rng["low"])
+    except IndiaError as e:
+        out["plan_note"] = "no long plan now: %s" % e
+        return out
+    plan = dict(p, symbol=name, date=today, setup="orb", stop_rule="or-mid", entry_time=out["last_bar"],
+                entry_bar=None, flat_by=cfg["flat_by"], tick_size=float(cfg["tick_size"]),
+                opening_range=rng, exchange="NSE", side="buy", created_by="trader-india")
+    out["plan"] = plan
+    try:
+        out["timemachine"] = time_machine(series, plan, now_utc, replays, seed, 2, None)
+    except IndiaError as e:
+        out["odds_note"] = str(e)
+    return out
+
+
+def nifty_desk(index_series, etf_series, cfg, now_utc, target_r=2.0, replays=10000):
+    """The whole desk: the index for the levels and the odds, the ETF for the trade that fits the
+    limits (sized and risk-checked). Pure."""
+    etf = cfg.get("nifty_etf") or "NIFTYBEES"
+    doc = {"created_by": "trader-india", "mode": "nifty", "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "as_of": to_ist(now_utc).strftime("%Y-%m-%d %H:%M IST"), "target_r": target_r,
+           "index": nifty_side(index_series, NIFTY_NAME, now_utc, cfg, target_r, replays),
+           "etf": nifty_side(etf_series, etf, now_utc, cfg, target_r, replays)}
+    e = doc["etf"]
+    if e.get("plan"):
+        order, limits, why = size_order(e["plan"], cfg)
+        e["limits"] = [{"limit": n, "how": h, "qty": q} for n, h, q in limits]
+        if order:
+            e["order"] = order
+            log = None
+            if os.path.exists(path("state/trades.json")):
+                log = read_json(path("state/trades.json"), "trades", required=False)
+            verdict, reasons, notes = check_order(order, cfg, log, now_utc)
+            e["risk"] = {"verdict": verdict, "reasons": reasons, "notes": notes, "fingerprint": fingerprint(order)}
+        else:
+            e["refused"] = why
+    return doc
+
+
+def _fmt_side(s, unit):
+    lines = []
+    head = "%s %s" % (s["name"], ("%s at %s" % (_p(s["last"]), s["last_bar"])) if s.get("last") is not None else "no data")
+    if s.get("change") is not None:
+        head += ", %+.2f (%+.2f%%) on the day" % (s["change"], s["change_pct"])
+    lines.append(head + ".")
+    if s.get("high") is not None:
+        lines.append("  Day range %s to %s." % (_p(s["low"]), _p(s["high"])))
+    if s.get("opening_range"):
+        r = s["opening_range"]
+        lines.append("  Opening range (9:15 to 9:30): %s to %s." % (_p(r["low"]), _p(r["high"])))
+    sig = s.get("signal") or {}
+    if sig.get("status") == "triggered":
+        lines.append("  Breakout signal: closed above the range at %s, %s." % (sig["entry_time"], _p(sig["entry"])))
+    elif sig.get("status") == "waiting":
+        lines.append("  No breakout yet: %s, %.2f%% under the range high %s." % (_p(sig["last"]), sig["away_pct"],
+                                                                              _p(sig["line"])))
+    elif sig.get("status"):
+        lines.append("  Signal: %s (%s)." % (sig["status"], sig.get("why") or ""))
+    if s.get("daily"):
+        d = s["daily"]
+        lines.append("  Daily setups (closes to %s): %s; RSI %s." % (d["as_of"], ", ".join(LABEL.get(t, t) for t in d["setups"]) or "none",
+                                                                  d["rsi"]))
+    p = s.get("plan")
+    if p:
+        lines.append("  Plan at the last price: entry %s, stop-loss %s (%s %s at risk), target %s, out by %s."
+                     % (_p(p["entry"]), _p(p["stop"]), _p(p["risk_per_share"]), unit, _p(p["target"]), p["flat_by"]))
+    elif s.get("plan_note"):
+        lines.append("  " + s["plan_note"] + ".")
+    tm = s.get("timemachine")
+    if tm:
+        mc = tm["mc"]
+        lines.append("  Time Machine: target first %.1f%%, stop first %.1f%%, neither %.1f%% by %s. %s"
+                     % (100 * mc["p_target"], 100 * mc["p_stop"], 100 * mc["p_neither"], mc["until"],
+                        tm["verdict"].split(":")[0] + "."))
+    return lines
+
+
+def cmd_nifty(a):
+    now = parse_now(a.now)
+    cfg = read_config(a.config)
+    trule, tparam = parse_target(a.target)
+    if trule != "r":
+        raise IndiaError("nifty --target wants a multiple of the risk, like 2R or 1.5R")
+    etf = (a.etf or cfg.get("nifty_etf") or "NIFTYBEES").upper()
+    cfg = dict(cfg, nifty_etf=etf)
+    if a.offline_index:
+        idx = load_offline(a.offline_index)[0]
+        idx = idx.get(NIFTY_NAME) or idx.get("^NSEI") or idx.get("NSEI") or (list(idx.values())[0] if len(idx) == 1 else None)
+        if idx is None:
+            raise IndiaError("no NIFTY 50 chart in %s" % a.offline_index)
+    else:
+        idx = parse_chart(yahoo_get(NIFTY_PATH), NIFTY_NAME)
+    etf_series = load_one(etf, a.offline_etf, "60d")
+    doc = nifty_desk(idx, etf_series, cfg, now, tparam, a.replays)
+    e = doc["etf"]
+    if not a.no_write:
+        write_json(path("nifty.json"), doc)
+        if e.get("order"):   # the ETF trade, in the files the ticket, broker and dashboard read
+            write_json(path("plan.json"), e["plan"])
+            if e["plan"] and e.get("timemachine"):
+                write_json(path("timemachine.json"), e["timemachine"])
+            write_json(path("orders.json"), {"created_by": "trader-india", "orders": [e["order"]]})
+            write_json(path("state/risk.json"), {"date": to_ist(now).date().isoformat(),
+                                                 "checked_at": to_ist(now).strftime("%Y-%m-%d %H:%M IST"),
+                                                 "results": [dict(e["risk"], symbol=etf)]})
+    if a.json:
+        print(json.dumps(doc, indent=2, default=str))
+        return 0
+    i = doc["index"]
+    print("Nifty desk, %s. %s" % (doc["as_of"], {"closed": "Market closed: " + i["phase_why"] + ".",
+                                                 "forming": "Too early: " + i["phase_why"] + ".",
+                                                 "late": "No new entries: " + i["phase_why"] + ".",
+                                                 "open": "Market open, entries allowed."}[i["phase"]]))
+    for ln in _fmt_side(i, "points"):
+        print(ln)
+    print("")
+    for ln in _fmt_side(e, "rupees a unit"):
+        print(ln)
+    if e.get("order"):
+        o, r = e["order"], e["risk"]
+        print("  Sized to your limits: %d units = %s, charges about %s, max loss at the stop %s."
+              % (o["qty"], rupees(o["value_inr"]), rupees(o["est_charges_inr"]), rupees(o["max_loss_inr"])))
+        print("  Risk check: %s%s" % (r["verdict"], ("; " + "; ".join(r["reasons"])) if r["reasons"] else ""))
+        if r["verdict"] == "PASS":
+            print("  The order: india.py ticket show (or broker preview with INDstocks on).")
+    elif e.get("refused"):
+        print("  Not sized: " + e["refused"])
+    if i["phase"] != "open":
+        print("Run it again after 9:35 AM IST on a trading day for a plan.")
+    print("The index is for the levels and the odds; %s is how a cash account trades them. "
+          "Matched rules and simulations, not predictions. %s" % (etf, SAFETY))
+    if not a.no_write:
+        print("Wrote %s. The dashboard shows it: dashboard.py --market india." % path("nifty.json"))
+    return 0
+
+
 # ---------------------------------------------------------------- fetching
 
 def progress(a, msg):
@@ -2260,6 +2465,15 @@ def main(argv=None):
     p.add_argument("--trades", default=path("state/trades.json"))
     p.add_argument("--state", default=path("state/risk.json"))
 
+    p = sub.add_parser("nifty", help="the Nifty desk: index levels and odds, and the NIFTYBEES trade sized and checked")
+    base(p)
+    p.add_argument("--target", default="2R", help="the target as a multiple of the risk (2R)")
+    p.add_argument("--etf", help="the fund that follows the Nifty (config nifty_etf, NIFTYBEES)")
+    p.add_argument("--replays", type=int, default=10000)
+    p.add_argument("--offline-index", metavar="FILE", help="a saved 60-day 5-minute NIFTY 50 chart")
+    p.add_argument("--offline-etf", metavar="PATH", help="a saved 60-day 5-minute chart of the fund")
+    p.add_argument("--no-write", action="store_true")
+
     p = sub.add_parser("status", help="today's trades and the running total")
     base(p)
     p.add_argument("--trades", default=path("state/trades.json"))
@@ -2270,7 +2484,7 @@ def main(argv=None):
         return 1
     try:
         return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb, "entry": cmd_entry,
-                "plan": cmd_plan, "replay": cmd_replay, "replay-all": cmd_replay_all, "size": cmd_size, "check": cmd_check, "ticket": cmd_ticket, "broker": cmd_broker,
+                "plan": cmd_plan, "replay": cmd_replay, "replay-all": cmd_replay_all, "size": cmd_size, "check": cmd_check, "ticket": cmd_ticket, "broker": cmd_broker, "nifty": cmd_nifty,
                 "status": cmd_status}[a.cmd](a)
     except IndiaError as e:
         print("india.py: %s" % e, file=sys.stderr)

@@ -125,6 +125,8 @@ def read_json(path):
 def load_market(root, market):
     names = ["watchlist", "entry", "plan", "timemachine", "orders", "state/risk"]
     names.append("state/trades" if market == "india" else "state/broker")
+    if market == "india":
+        names.append("nifty")
     d = {n.replace("state/", ""): read_json(os.path.join(root, n + ".json")) for n in names}
     d["config"] = read_json(os.path.join(root, "config.json"))
     rdir = os.path.join(root, "replays")
@@ -484,6 +486,79 @@ def limits(d, m):
     return cfg
 
 
+def render_nifty(doc, today):
+    """The Nifty desk card (trader/india/nifty.json from india.py nifty): the index's level, range,
+    signal, daily setups and, while entries are allowed, its plan and odds. Pure."""
+    if not doc or not isinstance(doc.get("index"), dict):
+        return ""
+    i = doc["index"]
+    etf = (doc.get("etf") or {}).get("name") or "NIFTYBEES"
+    out = ['<section class="card"><h2>Nifty 50</h2><div class="sub">NSE index, points, India time &middot; '
+           'india.py nifty, %s</div>' % _e(doc.get("as_of"))]
+    if str(doc.get("as_of") or "")[:10] != today:
+        out.append('<div class="box warn">OLD: this is from %s. Run india.py nifty again for today.</div>'
+                   % _e(str(doc.get("as_of"))[:10]))
+    phase = {"closed": "Market closed", "forming": "Opening range forming", "late": "No new entries",
+             "open": "Market open"}.get(i.get("phase"), "")
+    rows = []
+
+    def row(label, value, cls=""):
+        rows.append('<tr class="%s"><th>%s</th><td>%s</td></tr>' % (cls, _e(label), value))
+
+    if i.get("last") is not None:
+        ch = ""
+        if i.get("change") is not None:
+            ch = '<span class="why">%+.2f (%+.2f%%) from the previous close %s</span>' % (
+                i["change"], i["change_pct"], _e(price(i.get("prev_close"))))
+        row("Where it is", '<span class="big">%s</span><span class="why">at %s, %s</span>%s'
+            % (_e(price(i["last"])), _e(i.get("last_bar")), _e(i.get("date")), ch))
+    if i.get("high") is not None:
+        row("Day range", "%s to %s" % (_e(price(i["low"])), _e(price(i["high"]))))
+    row("Session", '<span class="pill %s">%s</span>%s' % (
+        "good" if i.get("phase") == "open" else "warn", _e(phase),
+        ('<span class="why">%s</span>' % _e(i["phase_why"])) if i.get("phase_why") else ""))
+    if i.get("opening_range"):
+        r = i["opening_range"]
+        row("Opening range", "%s to %s <span class=\"why\">9:15 to 9:30 AM</span>" % (_e(price(r["low"])), _e(price(r["high"]))))
+    sig = i.get("signal") or {}
+    if sig.get("status") == "triggered":
+        row("Breakout signal", '<span class="pill good">TRIGGERED</span><span class="why">closed above the range at %s, %s</span>'
+            % (_e(sig.get("entry_time")), _e(price(sig.get("entry")))))
+    elif sig.get("status") == "waiting":
+        row("Breakout signal", '<span class="pill warn">WAITING</span><span class="why">%.2f%% under the range high %s</span>'
+            % (sig.get("away_pct") or 0, _e(price(sig.get("line")))))
+    elif sig.get("status"):
+        row("Breakout signal", _e("%s: %s" % (sig["status"], sig.get("why") or "")))
+    if i.get("daily"):
+        dd = i["daily"]
+        row("Daily setups", "%s<span class=\"why\">daily closes to %s, RSI %s</span>" % (
+            _e(", ".join(str(t).replace("_", " ") for t in dd.get("setups") or []) or "none"), _e(dd.get("as_of")),
+            _e(dd.get("rsi"))))
+    p = i.get("plan")
+    if p:
+        row("Entry, at the last level", '<span class="big">%s</span>' % _e(price(p["entry"])), "buy")
+        row("Stop-loss", '<span class="big">%s</span><span class="why">the middle of the opening range; %s points at risk</span>'
+            % (_e(price(p["stop"])), _e(price(p["risk_per_share"]))), "stop")
+        row("Target", '<span class="big">%s</span><span class="why">%s</span>' % (_e(price(p["target"])), _e(p.get("target_label"))),
+            "target")
+        row("Close-out time", '<span class="big">%s IST</span>' % _e(_clock(p.get("flat_by"))))
+    elif i.get("plan_note"):
+        row("Plan", _e(i["plan_note"]))
+    tm = i.get("timemachine")
+    if tm:
+        mc = tm["mc"]
+        pt, ps, pn = 100 * mc["p_target"], 100 * mc["p_stop"], 100 * mc["p_neither"]
+        row("Time Machine odds", '<div class="odds"><i class="ot" style="width:%.1f%%"></i><i class="os" style="width:%.1f%%">'
+            '</i><i class="on" style="width:%.1f%%"></i></div><b>%.1f%%</b> target first &middot; <b>%.1f%%</b> stop first '
+            '&middot; <b>%.1f%%</b> neither by %s<span class="why">%s</span><span class="why">A simulation from the '
+            'index\'s own recent days, not a prediction.</span>'
+            % (pt, ps, pn, pt, ps, pn, _e(_clock(mc.get("until"))), _e(tm.get("verdict"))))
+    row("Trading it", '<span class="why">The index itself is not bought: futures and options are outside these tools. '
+        '%s, on the card below, follows it and is sized to your limits.</span>' % _e(etf))
+    out.append('<table class="trade">%s</table></section>' % "".join(rows))
+    return "".join(out)
+
+
 def render(now_utc, markets, paper=True, notes=None):
     """markets = [(market, files dict)]. Pure: the page as a string."""
     notes = notes or {}
@@ -495,6 +570,8 @@ def render(now_utc, markets, paper=True, notes=None):
            '<div class="box warn">%s</div>' % _e(NOTE)]
     for m, d in markets:
         today = local_now(now_utc, m).date().isoformat()
+        if m == "india":
+            out.append(render_nifty(d.get("nifty"), today))
         out.append(render_card(card_data(d, m, today), d, paper, notes.get(m), today))
     out.append('<footer>Prices from Yahoo Finance (free, can lag): check them in your broker\'s app before acting. '
                'Most people who day trade lose money. Education and tooling, not financial advice.</footer>'
