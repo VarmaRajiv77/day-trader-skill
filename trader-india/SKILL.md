@@ -35,6 +35,7 @@ people who day trade lose money; this does not change that.
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
 ```bash
+python3 "${CLAUDE_SKILL_DIR}/india.py" nifty                          # the Nifty desk: index levels + odds, NIFTYBEES trade
 python3 "${CLAUDE_SKILL_DIR}/india.py" universe                       # NSE EQUITY_L.csv -> trader/india/universe.txt
 python3 "${CLAUDE_SKILL_DIR}/india.py" daily                          # before 9:15 AM IST -> trader/india/watchlist.json
 python3 "${CLAUDE_SKILL_DIR}/india.py" daily --symbols RELIANCE,TCS,INFY,HDFCBANK
@@ -55,6 +56,26 @@ Common flags: `--now "2026-10-29 10:15"` (India time) pins the clock,
 `--offline PATH` reads saved files, `--json`, `--no-write`. Symbols are NSE's
 (`RELIANCE`, `M&M`, `BAJAJ-AUTO`); the tool adds Yahoo's `.NS` itself. Exit
 code 0 on a hit, a trigger or a PASS, 1 otherwise, with one plain line.
+
+## The Nifty desk
+
+For a user who trades the Nifty 50, `india.py nifty` is the whole day in one
+command. It fetches the NIFTY 50 index (`^NSEI`) and the fund that follows it
+(`nifty_etf`, NIFTYBEES: one unit is a share-sized slice of the index) and
+prints, for both: the level and the day's change, the day's range, the
+opening range and its breakout signal, and the daily setups. While entries
+are allowed (9:35 AM to `no_entries_after`) it also plans a trade at the last
+price (stop at the opening range's midpoint, target `--target`, 2R), runs the
+Time Machine on it, sizes the NIFTYBEES trade to the limits and risk-checks
+it, and writes `nifty.json` plus the usual `plan.json`, `timemachine.json`,
+`orders.json` and `state/risk.json`, so `ticket show`, `broker preview` and
+the dashboard work straight after. Before the open, after the close and on
+holidays it prints the last session's summary instead.
+
+Say plainly that the index cannot be bought in a cash account: Nifty futures
+(lots of 65) and options are outside these tools, and one futures lot risks
+many times a small account's limit. NIFTYBEES is how the limits are kept.
+Read the odds back as printed; never call the Nifty's direction.
 
 ## The files
 
@@ -104,7 +125,10 @@ of the budget a trade.
 1. Once a week: `india.py universe`. NSE sometimes refuses scripts; then the
    user downloads `EQUITY_L.csv` from nseindia.com in a browser and you run
    `universe --offline EQUITY_L.csv`.
-2. Before 9:15 AM IST: `india.py daily`. Say how many charts were fetched,
+2. A Nifty-only day: `india.py nifty` before the open (the last session and
+   the daily setups), again after 9:35 AM (the plan, the odds, the sized
+   NIFTYBEES order), and again whenever the user wants fresh levels. Then step 9.
+   Otherwise, before 9:15 AM IST: `india.py daily`. Say how many charts were fetched,
    passed the floors (Rs 50 and 1,00,000 shares by default) and were scanned,
    and the top few by setup. The whole list (about 2,000 EQ stocks, 100
    requests) takes a minute or two; `--symbols` for the user's own list. A
