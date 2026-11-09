@@ -1623,6 +1623,10 @@ def nifty_side(series, name, now_utc, cfg, target_r, replays, seed=19):
             out["opening_range"] = rng
     if phase != "open" or not out.get("opening_range"):
         return out
+    if (out.get("signal") or {}).get("status") != "triggered":   # the rule buys only after a close above the range
+        out["plan_note"] = "no plan until a 5-minute bar closes above the opening range high %s" % _p(
+            out["opening_range"]["high"])
+        return out
     rng = out["opening_range"]
     entry = out["last"]
     try:
