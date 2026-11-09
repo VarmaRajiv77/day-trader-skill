@@ -162,6 +162,10 @@ DEFAULTS = {
     "flat_by": "15:10",
     "tick_size": 0.05,
     "brokerage_per_order_inr": 20,
+    "brokerage_pct": None,
+    "brokerage_min_inr": None,
+    "brokerage_max_inr": None,
+    "gst_pct": 18,
     "charges_pct_round_trip": 0.05,
     "paper": True,
     "broker": "manual",
@@ -278,12 +282,25 @@ def to_tick(x, tick, up=False):
     return round(n * paise / 100.0, 2)
 
 
+def brokerage_per_order(cfg, value):
+    """One order's brokerage. With brokerage_pct set (INDmoney: 0.1 % or Rs 10, whichever is
+    lower, at least Rs 2), that formula plus GST on it; otherwise the flat brokerage_per_order_inr."""
+    if cfg.get("brokerage_pct") is None:
+        return float(cfg["brokerage_per_order_inr"])
+    b = float(value) * float(cfg["brokerage_pct"]) / 100.0
+    if cfg.get("brokerage_max_inr") is not None:
+        b = min(b, float(cfg["brokerage_max_inr"]))
+    if cfg.get("brokerage_min_inr") is not None:
+        b = max(b, float(cfg["brokerage_min_inr"]))
+    return b * (1 + float(cfg.get("gst_pct") or 0) / 100.0)
+
+
 def charges(cfg, price, qty):
-    """Estimated round-trip costs of a day trade: brokerage on two orders plus a
-    percent of the buy value for STT, exchange fees, stamp duty and GST. An estimate:
-    your contract note has the real figure."""
-    return round(2 * float(cfg["brokerage_per_order_inr"]) +
-                 float(cfg["charges_pct_round_trip"]) / 100.0 * price * qty, 2)
+    """Estimated round-trip costs of a day trade: brokerage on the buy and the sell, plus a
+    percent of the buy value for STT, exchange fees, stamp duty and the GST on them. An
+    estimate: your contract note has the real figure."""
+    value = float(price) * qty
+    return round(2 * brokerage_per_order(cfg, value) + float(cfg["charges_pct_round_trip"]) / 100.0 * value, 2)
 
 
 # ---------------------------------------------------------------- files
@@ -879,17 +896,23 @@ def size_order(plan, cfg):
     entry, stop, target = float(plan["entry"]), float(plan["stop"]), float(plan["target"])
     risk = entry - stop_fill(stop, cfg)   # with INDstocks, the stop leg may fill down at its limit
     budget = float(cfg["budget_inr"])
-    fixed = 2 * float(cfg["brokerage_per_order_inr"])
-    pct = float(cfg["charges_pct_round_trip"]) / 100.0
     max_loss = float(cfg["max_loss_per_trade_inr"])
     cap = budget * float(cfg["max_position_pct"]) / 100.0
     cash = budget * (1 - float(cfg["cash_buffer_pct"]) / 100.0)
-    room = max_loss - fixed
-    per = risk + pct * entry
+
+    def loss(q):   # the loss at the stop with charges; brokerage can depend on the order's size
+        return q * risk + charges(cfg, entry, q)
+
+    lo, hi = 0, max(0, int(math.floor(max_loss / risk + 1e-9))) if risk > 0 else 0
+    while lo < hi:   # the most shares whose loss at the stop fits (the loss grows with the shares)
+        mid = (lo + hi + 1) // 2
+        if loss(mid) <= max_loss + 0.005:
+            lo = mid
+        else:
+            hi = mid - 1
     limits = [
-        ("max loss", "(%s - %s brokerage) / (%s risk + %s charges) a share"
-         % (rupees(max_loss), rupees(fixed), _p(risk), _p(pct * entry)),
-         int(math.floor(room / per + 1e-9)) if room > 0 else 0),
+        ("max loss", "%s at the stop: %s risk a share plus charges"
+         % (rupees(max_loss), _p(risk)), lo),
         ("position cap", "%g%% of %s = %s / %s" % (cfg["max_position_pct"], rupees(budget), rupees(cap), _p(entry)),
          int(math.floor(cap / entry + 1e-9))),
         ("max order", "%s / %s" % (rupees(float(cfg["max_order_inr"])), _p(entry)),
@@ -903,7 +926,7 @@ def size_order(plan, cfg):
         if binds == "max loss":
             return None, limits, ("one share would lose %s at the stop with charges, over your %s max loss: the "
                                   "stop is too far for your limit. Find a tighter setup; do not raise the limit "
-                                  "to fit the trade." % (rupees(risk + fixed + pct * entry), rupees(max_loss)))
+                                  "to fit the trade." % (rupees(loss(1)), rupees(max_loss)))
         return None, limits, "one share costs %s, over your %s limit" % (rupees(entry), binds)
     value = round(qty * entry, 2)
     est = charges(cfg, entry, qty)

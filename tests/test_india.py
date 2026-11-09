@@ -235,6 +235,35 @@ class PlanAndSize(unittest.TestCase):
         self.assertIn("too far", why)
 
 
+class INDmoneyCharges(unittest.TestCase):
+    CFG = dict(india.DEFAULTS, brokerage_pct=0.1, brokerage_min_inr=2, brokerage_max_inr=10, gst_pct=18,
+               charges_pct_round_trip=0.036)
+
+    def test_the_formula(self):
+        # Rs 856 order: 0.1 % is 86 paise, so the Rs 2 minimum applies; plus 18 % GST, on the buy and the sell
+        self.assertAlmostEqual(india.brokerage_per_order(self.CFG, 856), 2.36)
+        self.assertEqual(india.charges(self.CFG, 285.3, 3), round(2 * 2.36 + 0.00036 * 855.9, 2))
+        # Rs 5,000: 0.1 % is Rs 5
+        self.assertAlmostEqual(india.brokerage_per_order(self.CFG, 5000), 5.9)
+        # Rs 75,000: 0.1 % would be Rs 75, capped at Rs 10
+        self.assertAlmostEqual(india.brokerage_per_order(self.CFG, 75000), 11.8)
+        # unset, the flat estimate stays
+        self.assertEqual(india.brokerage_per_order(dict(india.DEFAULTS), 75000), 20)
+
+    def test_sizing_uses_it(self):
+        plan = {"symbol": "ABC", "entry": 101.0, "stop": 99.75, "target": 103.5, "date": "2026-10-29"}
+        order, _, _ = india.size_order(plan, self.CFG)
+        # cheaper charges than the flat Rs 20 leave room for more shares (the flat model gives 738),
+        # but the position cap of Rs 75,000 / 101 = 742 binds
+        self.assertEqual((order["qty"], order["binds"]), (742, "position cap"))
+        self.assertLessEqual(order["max_loss_inr"], 1000)
+        small = dict(self.CFG, budget_inr=1000, max_position_pct=90, max_order_inr=900, max_loss_per_trade_inr=50)
+        order, _, _ = india.size_order({"symbol": "NIFTYBEES", "entry": 285.3, "stop": 284.45, "target": 287.0,
+                                        "date": "2026-11-09"}, small)
+        self.assertEqual(order["qty"], 3)
+        self.assertEqual(order["est_charges_inr"], round(2 * 2.36 + 0.00036 * 855.9, 2))
+
+
 class Risk(unittest.TestCase):
     CFG = dict(india.DEFAULTS)
 
