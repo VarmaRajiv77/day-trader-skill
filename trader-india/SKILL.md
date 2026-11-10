@@ -77,6 +77,31 @@ Say plainly that the index cannot be bought in a cash account: Nifty futures
 many times a small account's limit. NIFTYBEES is how the limits are kept.
 Read the odds back as printed; never call the Nifty's direction.
 
+## Break and retest, the daily trend, and levels
+
+Two optional rules, both off by default, set in `config.json`:
+
+- `"entry_rule": "retest"` (the default `"break"` buys on the first 5-minute
+  close above the opening range high). With "retest" the breakout only arms
+  the trade: `entry` and the Nifty desk then wait for a later bar that pulls
+  back to within `retest_tol_pct` (0.05 %) of the range high and still
+  CLOSES above it, and buy that close. If price falls back to the middle of
+  the range first, the setup has failed: no trade that day. Statuses:
+  `retest_wait`, `failed`, `triggered`. The Time Machine's history uses the
+  same rule.
+- `"trend_filter": true`: the Nifty desk plans nothing when the last daily
+  close is under its 20-day average (a top-down check: trade breakouts only
+  with the bigger trend).
+
+The desk always shows the daily trend and the support and resistance levels
+from the previous day and the past week, and notes when the target sits above
+the nearest resistance.
+
+On the Nifty's 58 sessions to 9 Nov 2026 (stop at the range's middle, target
+2R, out by 3:10 PM): break 32 trades, +0.05 R a trade; break and retest 29,
++0.15 R; retest with the daily trend up 11, +0.25 R. A small sample: say so
+when you quote it, and never as a promise.
+
 ## The files
 
 Everything lives in `trader/india/`, apart from the US files in `trader/`.

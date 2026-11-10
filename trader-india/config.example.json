@@ -1,5 +1,5 @@
 {
-  "_note": "Rs 1,00,000 budget, Rs 1,000 max loss a trade, Rs 2,000 a day, stop for a review at Rs 5,000 lost in total. Charges are estimates: set brokerage_per_order_inr and charges_pct_round_trip from your broker's charges page and your contract notes. tick_size 0.05 suits most NSE stocks; check yours. broker: \"manual\" (you type every order) or \"indstocks\" (india.py broker sends it after your yes; needs INDSTOCKS_TOKEN and a static IP). sl_limit_buffer_pct: how far under the stop the stop-loss leg may fill. nifty_etf: the fund india.py nifty trades for the Nifty 50. For INDmoney's real brokerage (0.1 % or Rs 10 per order, whichever is lower, at least Rs 2, plus 18 % GST) set brokerage_pct 0.1, brokerage_min_inr 2, brokerage_max_inr 10, and charges_pct_round_trip 0.036 for intraday STT, exchange fees, stamp duty and GST.",
+  "_note": "Rs 1,00,000 budget, Rs 1,000 max loss a trade, Rs 2,000 a day, stop for a review at Rs 5,000 lost in total. Charges are estimates: set brokerage_per_order_inr and charges_pct_round_trip from your broker's charges page and your contract notes. tick_size 0.05 suits most NSE stocks; check yours. broker: \"manual\" (you type every order) or \"indstocks\" (india.py broker sends it after your yes; needs INDSTOCKS_TOKEN and a static IP). sl_limit_buffer_pct: how far under the stop the stop-loss leg may fill. nifty_etf: the fund india.py nifty trades for the Nifty 50. For INDmoney's real brokerage (0.1 % or Rs 10 per order, whichever is lower, at least Rs 2, plus 18 % GST) set brokerage_pct 0.1, brokerage_min_inr 2, brokerage_max_inr 10, and charges_pct_round_trip 0.036 for intraday STT, exchange fees, stamp duty and GST. entry_rule: \"break\" buys on the first 5-minute close above the opening range; \"retest\" waits for a pullback to that level that closes back above it (retest_tol_pct: how close the pullback must come). trend_filter: true sits out when the last daily close is under its 20-day average.",
   "budget_inr": 100000,
   "cash_buffer_pct": 10,
   "max_position_pct": 75,
@@ -27,6 +27,9 @@
   "sl_limit_buffer_pct": 0.5,
   "tgt_limit_ticks": 1,
   "nifty_etf": "NIFTYBEES",
+  "entry_rule": "break",
+  "retest_tol_pct": 0.05,
+  "trend_filter": false,
   "blocked": [],
   "allow_margin": false,
   "allow_short": false

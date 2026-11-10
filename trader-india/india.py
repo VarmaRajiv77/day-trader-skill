@@ -173,6 +173,9 @@ DEFAULTS = {
     "sl_limit_buffer_pct": 0.5,
     "tgt_limit_ticks": 1,
     "nifty_etf": "NIFTYBEES",
+    "entry_rule": "break",
+    "retest_tol_pct": 0.05,
+    "trend_filter": False,
     "blocked": [],
     "allow_margin": False,
     "allow_short": False,
@@ -786,8 +789,23 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
 
 # ---------------------------------------------------------------- entry
 
-def entry_status(series, now_utc, or_minutes=15, until=None, level=None):
-    """One stock: not_open / waiting / triggered / expired. Pure."""
+def find_retest(bars, k_break, top, mid, last, tol_pct):
+    """Break and retest: after the bar k_break closed above `top`, the first later bar (up to
+    `last`) whose low comes back to within tol_pct of `top` and that still CLOSES above it.
+    -> (index, None), (None, "failed") when price fell back to `mid` first, or (None, None)."""
+    near = top * (1 + float(tol_pct) / 100.0)
+    for i in range(k_break + 1, min(last, len(bars) - 1) + 1):
+        b = bars[i]
+        if b["l"] <= mid:
+            return None, "failed"
+        if b["l"] <= near and b["c"] > top:
+            return i, None
+    return None, None
+
+
+def entry_status(series, now_utc, or_minutes=15, until=None, level=None, rule="break", tol_pct=0.05):
+    """One stock: not_open / waiting / triggered / expired, and with rule "retest" also
+    retest_wait (broke out, waiting for the pullback) and failed. Pure."""
     now = to_ist(now_utc)
     day = now.date()
     n_range = or_minutes // BAR_MIN
@@ -808,6 +826,27 @@ def entry_status(series, now_utc, or_minutes=15, until=None, level=None):
     base.update(opening_range={"high": round(oh, 2), "low": round(ol, 2), "minutes": or_minutes},
                 level=round(float(level), 2) if level is not None else None)
     h = orb_hit(bars, n_range, level)
+    if h and rule == "retest":
+        top = oh if level is None else float(level)
+        k, why = find_retest(bars, h["bar_index"], top, (oh + ol) / 2.0, len(bars) - 1, tol_pct)
+        broke = {"broke_at": h["at"], "broke_price": h["price"]}
+        if why == "failed":
+            return dict(base, status="failed", line=round(top, 2), entry_rule=rule, **dict(broke, why=(
+                "broke out at %s (%s), then fell back to the middle of the range before any retest: no trade"
+                % (h["at"], _p(h["price"])))))
+        if k is None:
+            if until is not None and cutoff.time() > until:
+                return dict(base, status="expired", entry_rule=rule, why="no retest before %s" % until.strftime("%H:%M"),
+                            **broke)
+            return dict(base, status="retest_wait", line=round(top, 2), last=round(bars[-1]["c"], 2), entry_rule=rule,
+                        why="broke out at %s (%s); waiting for a pullback to %s that closes back above it"
+                        % (h["at"], _p(h["price"]), _p(top)), **broke)
+        b = bars[k]
+        at = b["start"] + datetime.timedelta(minutes=BAR_MIN)
+        late = until is not None and at.time() > until
+        return dict(base, status="expired" if late else "triggered", entry=round(b["c"], 2), entry_time=clock_label(at),
+                    entry_bar=k, pct_over=round((b["c"] / top - 1) * 100, 2), entry_rule=rule,
+                    why="retest triggered after no_entries_after" if late else "", **broke)
     if h:
         late = until is not None and h["_t"].time() > until
         return dict(base, status="expired" if late else "triggered", entry=h["price"], entry_time=h["at"],
@@ -1125,6 +1164,8 @@ def history_replay(sessions, rule, last, tick):
     for d, D in sessions:
         oh, ol = max(b["h"] for b in D[:n]), min(b["l"] for b in D[:n])
         kk = next((i for i in range(n, last + 1) if D[i]["c"] > oh), None)
+        if kk is not None and rule.get("entry_rule") == "retest":
+            kk, _ = find_retest(D, kk, oh, (oh + ol) / 2.0, last, rule.get("retest_tol_pct", 0.05))
         if kk is None:
             continue
         e = round(D[kk]["c"], 2)
@@ -1221,7 +1262,8 @@ def time_machine(series, plan, now_utc, replays=10000, seed=19, window=2, until=
     rng = plan.get("opening_range") or {}
     if plan.get("setup") == "orb" and rng.get("minutes"):
         srule = plan.get("stop_rule") if plan.get("stop_rule") in ("or-mid", "or-low") else "pct"
-        rule = {"or_minutes": int(rng["minutes"]), "stop_rule": srule, "target_r": mc["r_at_target"]}
+        rule = {"or_minutes": int(rng["minutes"]), "stop_rule": srule, "target_r": mc["r_at_target"],
+                "entry_rule": plan.get("entry_rule") or "break", "retest_tol_pct": float(plan.get("retest_tol_pct") or 0.05)}
         if srule == "pct":
             rule["stop_pct"] = round(100.0 * (entry - stop) / entry, 4)
         history = history_replay(sessions, rule, last, float(plan.get("tick_size") or 0.05))
@@ -1636,19 +1678,44 @@ def nifty_side(series, name, now_utc, cfg, target_r, replays, seed=19):
     if out.get("last") is not None and out.get("prev_close"):
         out["change"] = round(out["last"] - out["prev_close"], 2)
         out["change_pct"] = round((out["last"] / out["prev_close"] - 1) * 100, 2)
+    full = [c for d, c in closes if d < today]
+    if len(full) >= 21:   # top-down: the daily trend, last close against its 20-day average
+        ma = sum(full[-20:]) / 20.0
+        out["trend"] = {"close": round(full[-1], 2), "ma20": round(ma, 2), "up": full[-1] > ma,
+                        "as_of": [d for d, _ in closes if d < today][-1]}
+    past = [d for d in sorted(days) if d < today and len(days[d]) == SESSION_BARS]
+    if past:   # support and resistance from the sessions before today
+        pd = days[past[-1]]
+        week = [days[d][i] for d in past[-5:] for i in days[d]]
+        out["levels"] = {"prev_high": round(max(b["h"] for b in pd.values()), 2),
+                         "prev_low": round(min(b["l"] for b in pd.values()), 2),
+                         "week_high": round(max(b["h"] for b in week), 2), "week_low": round(min(b["l"] for b in week), 2)}
     phase, why = _phase(now_utc, cfg)
     out.update(phase=phase, phase_why=why)
     if phase in ("open", "late"):
-        e = entry_status(series, now_utc, 15, parse_hhmm(cfg["no_entries_after"]))
-        out["signal"] = {k: e.get(k) for k in ("status", "entry", "entry_time", "pct_over", "line", "last", "away_pct", "why")}
+        e = entry_status(series, now_utc, 15, parse_hhmm(cfg["no_entries_after"]), None, cfg["entry_rule"],
+                         cfg["retest_tol_pct"])
+        out["signal"] = {k: e.get(k) for k in ("status", "entry", "entry_time", "pct_over", "line", "last", "away_pct",
+                                               "why", "broke_at", "broke_price", "entry_rule")}
         rng = e.get("opening_range")
         if rng:
             out["opening_range"] = rng
     if phase != "open" or not out.get("opening_range"):
         return out
-    if (out.get("signal") or {}).get("status") != "triggered":   # the rule buys only after a close above the range
-        out["plan_note"] = "no plan until a 5-minute bar closes above the opening range high %s" % _p(
-            out["opening_range"]["high"])
+    sig = out.get("signal") or {}
+    if sig.get("status") != "triggered":   # the rule buys only after a close above the range (and its retest)
+        if sig.get("status") == "retest_wait":
+            out["plan_note"] = "no plan until the retest: %s" % sig["why"]
+        elif sig.get("status") == "failed":
+            out["plan_note"] = sig["why"]
+        else:
+            out["plan_note"] = "no plan until a 5-minute bar closes above the opening range high %s%s" % (
+                _p(out["opening_range"]["high"]), " and then retests it" if cfg["entry_rule"] == "retest" else "")
+        return out
+    if cfg.get("trend_filter") and out.get("trend") and not out["trend"]["up"]:
+        t = out["trend"]
+        out["plan_note"] = ("the daily trend is down (close %s under its 20-day average %s): your trend filter "
+                            "says sit out" % (_p(t["close"]), _p(t["ma20"])))
         return out
     rng = out["opening_range"]
     entry = out["last"]
@@ -1659,7 +1726,14 @@ def nifty_side(series, name, now_utc, cfg, target_r, replays, seed=19):
         return out
     plan = dict(p, symbol=name, date=today, setup="orb", stop_rule="or-mid", entry_time=out["last_bar"],
                 entry_bar=None, flat_by=cfg["flat_by"], tick_size=float(cfg["tick_size"]),
-                opening_range=rng, exchange="NSE", side="buy", created_by="trader-india")
+                opening_range=rng, exchange="NSE", side="buy", created_by="trader-india",
+                entry_rule=cfg["entry_rule"], retest_tol_pct=float(cfg["retest_tol_pct"]))
+    lv = out.get("levels") or {}
+    above = sorted(v for v in (lv.get("prev_high"), lv.get("week_high")) if v and v > plan["entry"])
+    if above and plan["target"] > above[0]:
+        plan["resistance_note"] = ("the target %s is above resistance at %s (%s): price may stall there first"
+                                   % (_p(plan["target"]), _p(above[0]),
+                                      "the previous day's high" if above[0] == lv.get("prev_high") else "the week's high"))
     out["plan"] = plan
     try:
         out["timemachine"] = time_machine(series, plan, now_utc, replays, seed, 2, None)
@@ -1704,13 +1778,29 @@ def _fmt_side(s, unit):
         r = s["opening_range"]
         lines.append("  Opening range (9:15 to 9:30): %s to %s." % (_p(r["low"]), _p(r["high"])))
     sig = s.get("signal") or {}
-    if sig.get("status") == "triggered":
+    if sig.get("status") == "triggered" and sig.get("entry_rule") == "retest":
+        lines.append("  Break and retest: broke out at %s, retested and closed back above at %s, %s."
+                     % (sig["broke_at"], sig["entry_time"], _p(sig["entry"])))
+    elif sig.get("status") == "triggered":
         lines.append("  Breakout signal: closed above the range at %s, %s." % (sig["entry_time"], _p(sig["entry"])))
     elif sig.get("status") == "waiting":
         lines.append("  No breakout yet: %s, %.2f%% under the range high %s." % (_p(sig["last"]), sig["away_pct"],
                                                                               _p(sig["line"])))
-    elif sig.get("status"):
+    elif sig.get("status") and sig["status"] not in ("retest_wait", "failed"):
         lines.append("  Signal: %s (%s)." % (sig["status"], sig.get("why") or ""))
+    if sig.get("status") == "retest_wait":
+        lines.append("  Broke out at %s (%s); waiting for the retest: a pullback to %s that closes back above it."
+                     % (sig["broke_at"], _p(sig["broke_price"]), _p(sig["line"])))
+    elif sig.get("status") == "failed":
+        lines.append("  " + sig["why"] + ".")
+    if s.get("trend"):
+        t = s["trend"]
+        lines.append("  Daily trend: %s (close %s %s its 20-day average %s)."
+                     % ("UP" if t["up"] else "DOWN", _p(t["close"]), "over" if t["up"] else "under", _p(t["ma20"])))
+    if s.get("levels"):
+        lv = s["levels"]
+        lines.append("  Levels: previous day %s to %s, past week %s to %s."
+                     % (_p(lv["prev_low"]), _p(lv["prev_high"]), _p(lv["week_low"]), _p(lv["week_high"])))
     if s.get("daily"):
         d = s["daily"]
         lines.append("  Daily setups (closes to %s): %s; RSI %s." % (d["as_of"], ", ".join(LABEL.get(t, t) for t in d["setups"]) or "none",
@@ -1719,6 +1809,8 @@ def _fmt_side(s, unit):
     if p:
         lines.append("  Plan at the last price: entry %s, stop-loss %s (%s %s at risk), target %s, out by %s."
                      % (_p(p["entry"]), _p(p["stop"]), _p(p["risk_per_share"]), unit, _p(p["target"]), p["flat_by"]))
+        if p.get("resistance_note"):
+            lines.append("  Note: " + p["resistance_note"] + ".")
     elif s.get("plan_note"):
         lines.append("  " + s["plan_note"] + ".")
     tm = s.get("timemachine")
@@ -2049,7 +2141,7 @@ def cmd_entry(a):
     sym = from_yahoo(a.symbol)
     until = parse_hhmm(cfg["no_entries_after"], "no_entries_after")
     series = load_one(sym, a.offline, "1d")
-    res = entry_status(series, now, a.or_minutes, until, a.level)
+    res = entry_status(series, now, a.or_minutes, until, a.level, cfg["entry_rule"], cfg["retest_tol_pct"])
     res.update(symbol=sym, exchange="NSE", setup="orb" if a.level is None else "level",
                created_by="trader-india", checked_at=to_ist(now).strftime("%Y-%m-%d %H:%M IST"))
     if not a.no_write and res["status"] == "triggered":
@@ -2098,6 +2190,7 @@ def cmd_plan(a):
     p = compute_plan(e["entry"], srule, sparam, trule, tparam, float(cfg["tick_size"]), rng.get("high"), rng.get("low"))
     plan = dict(p, created_by="trader-india", exchange="NSE", symbol=e["symbol"], side="buy", date=e.get("date"),
                 setup=e.get("setup"), entry_time=a.entry_time or e.get("entry_time"), entry_bar=e.get("entry_bar"),
+                entry_rule=e.get("entry_rule") or "break", retest_tol_pct=float(cfg["retest_tol_pct"]),
                 stop_rule=srule, opening_range=e.get("opening_range"),
                 flat_by=a.flat_by or cfg["flat_by"], tick_size=float(cfg["tick_size"]))
     parse_hhmm(plan["flat_by"], "--flat-by")
