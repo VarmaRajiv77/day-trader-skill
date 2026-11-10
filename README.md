@@ -134,6 +134,9 @@ universe -> daily (before 9:15) -> orb (after 9:35) -> entry -> plan -> replay -
 
 - The stock list is NSE's own equity file, series EQ.
 - The opening range is 9:15 to 9:30. The stop rounds to the NSE tick (0.05).
+- Optional break-and-retest entries (`"entry_rule": "retest"`) and a daily
+  trend filter (`"trend_filter": true`), with support and resistance levels
+  on the Nifty desk.
 - `replay` is the Time Machine for NSE: 10,000 replays of the rest of the
   session to your flat-by time from the stock's own last 60 days of bars,
   plus every past day the rule fired, and one honest verdict.

@@ -521,7 +521,16 @@ def render_nifty(doc, today):
         r = i["opening_range"]
         row("Opening range", "%s to %s <span class=\"why\">9:15 to 9:30 AM</span>" % (_e(price(r["low"])), _e(price(r["high"]))))
     sig = i.get("signal") or {}
-    if sig.get("status") == "triggered":
+    if sig.get("status") == "triggered" and sig.get("entry_rule") == "retest":
+        row("Break and retest", '<span class="pill good">TRIGGERED</span><span class="why">broke out at %s, retested and '
+            'closed back above at %s, %s</span>' % (_e(sig.get("broke_at")), _e(sig.get("entry_time")), _e(price(sig.get("entry")))))
+    elif sig.get("status") == "retest_wait":
+        row("Break and retest", '<span class="pill warn">WAITING FOR RETEST</span><span class="why">broke out at %s (%s); '
+            'buy only after a pullback to %s closes back above it</span>'
+            % (_e(sig.get("broke_at")), _e(price(sig.get("broke_price"))), _e(price(sig.get("line")))))
+    elif sig.get("status") == "failed":
+        row("Break and retest", '<span class="pill bad">FAILED</span><span class="why">%s</span>' % _e(sig.get("why")))
+    elif sig.get("status") == "triggered":
         row("Breakout signal", '<span class="pill good">TRIGGERED</span><span class="why">closed above the range at %s, %s</span>'
             % (_e(sig.get("entry_time")), _e(price(sig.get("entry")))))
     elif sig.get("status") == "waiting":
@@ -529,6 +538,15 @@ def render_nifty(doc, today):
             % (sig.get("away_pct") or 0, _e(price(sig.get("line")))))
     elif sig.get("status"):
         row("Breakout signal", _e("%s: %s" % (sig["status"], sig.get("why") or "")))
+    if i.get("trend"):
+        t = i["trend"]
+        row("Daily trend", '<span class="pill %s">%s</span><span class="why">close %s %s its 20-day average %s (%s)</span>'
+            % ("good" if t["up"] else "bad", "UP" if t["up"] else "DOWN", _e(price(t["close"])),
+               "over" if t["up"] else "under", _e(price(t["ma20"])), _e(t["as_of"])))
+    if i.get("levels"):
+        lv = i["levels"]
+        row("Support and resistance", "previous day %s to %s<span class=\"why\">past week %s to %s</span>"
+            % (_e(price(lv["prev_low"])), _e(price(lv["prev_high"])), _e(price(lv["week_low"])), _e(price(lv["week_high"]))))
     if i.get("daily"):
         dd = i["daily"]
         row("Daily setups", "%s<span class=\"why\">daily closes to %s, RSI %s</span>" % (
@@ -539,8 +557,9 @@ def render_nifty(doc, today):
         row("Entry, at the last level", '<span class="big">%s</span>' % _e(price(p["entry"])), "buy")
         row("Stop-loss", '<span class="big">%s</span><span class="why">the middle of the opening range; %s points at risk</span>'
             % (_e(price(p["stop"])), _e(price(p["risk_per_share"]))), "stop")
-        row("Target", '<span class="big">%s</span><span class="why">%s</span>' % (_e(price(p["target"])), _e(p.get("target_label"))),
-            "target")
+        row("Target", '<span class="big">%s</span><span class="why">%s</span>%s' % (
+            _e(price(p["target"])), _e(p.get("target_label")),
+            ('<span class="why">Note: %s</span>' % _e(p["resistance_note"])) if p.get("resistance_note") else ""), "target")
         row("Close-out time", '<span class="big">%s IST</span>' % _e(_clock(p.get("flat_by"))))
     elif i.get("plan_note"):
         row("Plan", _e(i["plan_note"]))

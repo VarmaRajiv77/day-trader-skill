@@ -39,6 +39,14 @@ class Desk(unittest.TestCase):
         self.assertEqual(e["risk"]["verdict"], "PASS")
         self.assertEqual(e["risk"]["fingerprint"], india.fingerprint(e["order"]))
 
+    def test_no_plan_before_the_breakout(self):
+        doc = self.desk("2026-10-29 09:36")          # the 9:35 bar has not closed above the range yet
+        i = doc["index"]
+        self.assertEqual(i["signal"]["status"], "waiting")
+        self.assertNotIn("plan", i)
+        self.assertIn("no plan until a 5-minute bar closes above the opening range high 100.50", i["plan_note"])
+        self.assertNotIn("order", doc["etf"])
+
     def test_weekend_is_a_summary_with_no_plan(self):
         doc = self.desk("2026-10-31 18:00")
         i = doc["index"]
