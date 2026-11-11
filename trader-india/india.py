@@ -1712,6 +1712,11 @@ def nifty_side(series, name, now_utc, cfg, target_r, replays, seed=19):
             out["plan_note"] = "no plan until a 5-minute bar closes above the opening range high %s%s" % (
                 _p(out["opening_range"]["high"]), " and then retests it" if cfg["entry_rule"] == "retest" else "")
         return out
+    if out["last"] <= out["opening_range"]["high"]:   # the signal fired, but price is back under the line
+        out["plan_note"] = ("the signal fired at %s (%s), but the price is now %s, back under the range high %s: "
+                            "the moment has passed, no entry now" % (sig.get("entry_time"), _p(sig.get("entry")),
+                                                                    _p(out["last"]), _p(out["opening_range"]["high"])))
+        return out
     if cfg.get("trend_filter") and out.get("trend") and not out["trend"]["up"]:
         t = out["trend"]
         out["plan_note"] = ("the daily trend is down (close %s under its 20-day average %s): your trend filter "

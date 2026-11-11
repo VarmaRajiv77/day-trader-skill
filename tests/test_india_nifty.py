@@ -47,6 +47,15 @@ class Desk(unittest.TestCase):
         self.assertIn("no plan until a 5-minute bar closes above the opening range high 100.50", i["plan_note"])
         self.assertNotIn("order", doc["etf"])
 
+    def test_no_plan_once_price_is_back_under_the_line(self):
+        from test_india import ORB_BARS, chart
+        bars = ORB_BARS + [(101.1, 101.1, 100.2, 100.3, 900)]      # triggered at 9:40, then back under 100.50
+        idx = india.parse_chart(chart("NSEI", bars))
+        side = india.nifty_side(idx, "NIFTY 50", india.parse_now("2026-10-29 09:51"), self.CFG, 2.0, 100)
+        self.assertEqual(side["signal"]["status"], "triggered")
+        self.assertNotIn("plan", side)
+        self.assertIn("back under the range high 100.50", side["plan_note"])
+
     def test_weekend_is_a_summary_with_no_plan(self):
         doc = self.desk("2026-10-31 18:00")
         i = doc["index"]
