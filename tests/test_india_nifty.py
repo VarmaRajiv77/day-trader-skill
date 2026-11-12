@@ -47,6 +47,15 @@ class Desk(unittest.TestCase):
         self.assertIn("no plan until a 5-minute bar closes above the opening range high 100.50", i["plan_note"])
         self.assertNotIn("order", doc["etf"])
 
+    def test_no_plan_once_price_is_back_under_the_line(self):
+        from test_india import ORB_BARS, chart
+        bars = ORB_BARS + [(101.1, 101.1, 100.2, 100.3, 900)]      # triggered at 9:40, then back under 100.50
+        idx = india.parse_chart(chart("NSEI", bars))
+        side = india.nifty_side(idx, "NIFTY 50", india.parse_now("2026-10-29 09:51"), self.CFG, 2.0, 100)
+        self.assertEqual(side["signal"]["status"], "triggered")
+        self.assertNotIn("plan", side)
+        self.assertIn("back under the range high 100.50", side["plan_note"])
+
     def test_weekend_is_a_summary_with_no_plan(self):
         doc = self.desk("2026-10-31 18:00")
         i = doc["index"]
@@ -64,6 +73,16 @@ class Desk(unittest.TestCase):
         self.assertEqual(late["phase"], "late")
         self.assertNotIn("plan", late)
         self.assertEqual(self.desk("2026-11-10 10:00")["index"]["phase_why"], "NSE holiday: Diwali Balipratipada")
+
+
+class IndexOnly(unittest.TestCase):
+    def test_no_fund(self):
+        doc = india.nifty_desk(series("NSEI"), None, dict(india.DEFAULTS), india.parse_now("2026-10-29 09:46"), 2.0, 200)
+        self.assertIsNone(doc["etf"])
+        self.assertIn("plan", doc["index"])
+        page = dash.render_nifty(doc, "2026-10-29")
+        self.assertIn("Levels and odds for the index only", page)
+        self.assertNotIn("NIFTYBEES", page)
 
 
 class Cli(unittest.TestCase):
@@ -105,6 +124,17 @@ class Cli(unittest.TestCase):
         self.assertIn("<h2>Nifty 50</h2>", page)
         self.assertIn("TRIGGERED", page)
         self.assertLess(page.index("<h2>Nifty 50</h2>"), page.index("<h2>Indian stocks</h2>"))
+
+    def test_index_only_from_the_config(self):
+        os.makedirs("trader/india", exist_ok=True)
+        with open("trader/india/config.json", "w") as fh:
+            json.dump({"nifty_etf": ""}, fh)
+        code, text, err = self.run_cli("nifty", "--offline-index", "NSEI.json", "--replays", "200",
+                                       "--now", "2026-10-29 09:46")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("NIFTYBEES", text)
+        self.assertIn("Index levels and odds only", text)
+        self.assertFalse(os.path.exists("trader/india/orders.json"))
 
     def test_weekend_writes_only_the_summary(self):
         code, text, err = self.run_cli("nifty", "--offline-index", "NSEI.json", "--offline-etf", "etf",

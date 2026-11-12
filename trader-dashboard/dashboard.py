@@ -572,8 +572,12 @@ def render_nifty(doc, today):
             '&middot; <b>%.1f%%</b> neither by %s<span class="why">%s</span><span class="why">A simulation from the '
             'index\'s own recent days, not a prediction.</span>'
             % (pt, ps, pn, pt, ps, pn, _e(_clock(mc.get("until"))), _e(tm.get("verdict"))))
-    row("Trading it", '<span class="why">The index itself is not bought: futures and options are outside these tools. '
-        '%s, on the card below, follows it and is sized to your limits.</span>' % _e(etf))
+    if doc.get("etf"):
+        row("Trading it", '<span class="why">The index itself is not bought: futures and options are outside these tools. '
+            '%s, on the card below, follows it and is sized to your limits.</span>' % _e(etf))
+    else:
+        row("Trading it", '<span class="why">Levels and odds for the index only. The index trades as futures and options, '
+            'which these tools do not size or risk-check: work out your own size within your limits.</span>')
     out.append('<table class="trade">%s</table></section>' % "".join(rows))
     return "".join(out)
 
