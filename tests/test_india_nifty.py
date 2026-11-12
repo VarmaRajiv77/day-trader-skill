@@ -75,6 +75,16 @@ class Desk(unittest.TestCase):
         self.assertEqual(self.desk("2026-11-10 10:00")["index"]["phase_why"], "NSE holiday: Diwali Balipratipada")
 
 
+class IndexOnly(unittest.TestCase):
+    def test_no_fund(self):
+        doc = india.nifty_desk(series("NSEI"), None, dict(india.DEFAULTS), india.parse_now("2026-10-29 09:46"), 2.0, 200)
+        self.assertIsNone(doc["etf"])
+        self.assertIn("plan", doc["index"])
+        page = dash.render_nifty(doc, "2026-10-29")
+        self.assertIn("Levels and odds for the index only", page)
+        self.assertNotIn("NIFTYBEES", page)
+
+
 class Cli(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -114,6 +124,17 @@ class Cli(unittest.TestCase):
         self.assertIn("<h2>Nifty 50</h2>", page)
         self.assertIn("TRIGGERED", page)
         self.assertLess(page.index("<h2>Nifty 50</h2>"), page.index("<h2>Indian stocks</h2>"))
+
+    def test_index_only_from_the_config(self):
+        os.makedirs("trader/india", exist_ok=True)
+        with open("trader/india/config.json", "w") as fh:
+            json.dump({"nifty_etf": ""}, fh)
+        code, text, err = self.run_cli("nifty", "--offline-index", "NSEI.json", "--replays", "200",
+                                       "--now", "2026-10-29 09:46")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("NIFTYBEES", text)
+        self.assertIn("Index levels and odds only", text)
+        self.assertFalse(os.path.exists("trader/india/orders.json"))
 
     def test_weekend_writes_only_the_summary(self):
         code, text, err = self.run_cli("nifty", "--offline-index", "NSEI.json", "--offline-etf", "etf",

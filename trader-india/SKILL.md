@@ -72,6 +72,9 @@ it, and writes `nifty.json` plus the usual `plan.json`, `timemachine.json`,
 the dashboard work straight after. Before the open, after the close and on
 holidays it prints the last session's summary instead.
 
+Set `"nifty_etf": ""` (or pass `--no-etf`) for the index only: levels, signal,
+plan and odds in Nifty points, with no fund, sizing or order files.
+
 Say plainly that the index cannot be bought in a cash account: Nifty futures
 (lots of 65) and options are outside these tools, and one futures lot risks
 many times a small account's limit. NIFTYBEES is how the limits are kept.

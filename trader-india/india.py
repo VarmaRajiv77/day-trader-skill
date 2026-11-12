@@ -1754,9 +1754,9 @@ def nifty_desk(index_series, etf_series, cfg, now_utc, target_r=2.0, replays=100
     doc = {"created_by": "trader-india", "mode": "nifty", "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
            "as_of": to_ist(now_utc).strftime("%Y-%m-%d %H:%M IST"), "target_r": target_r,
            "index": nifty_side(index_series, NIFTY_NAME, now_utc, cfg, target_r, replays),
-           "etf": nifty_side(etf_series, etf, now_utc, cfg, target_r, replays)}
+           "etf": nifty_side(etf_series, etf, now_utc, cfg, target_r, replays) if etf_series is not None else None}
     e = doc["etf"]
-    if e.get("plan"):
+    if e and e.get("plan"):
         order, limits, why = size_order(e["plan"], cfg)
         e["limits"] = [{"limit": n, "how": h, "qty": q} for n, h, q in limits]
         if order:
@@ -1833,8 +1833,9 @@ def cmd_nifty(a):
     trule, tparam = parse_target(a.target)
     if trule != "r":
         raise IndiaError("nifty --target wants a multiple of the risk, like 2R or 1.5R")
-    etf = (a.etf or cfg.get("nifty_etf") or "NIFTYBEES").upper()
-    cfg = dict(cfg, nifty_etf=etf)
+    etf = a.etf if a.etf is not None else cfg.get("nifty_etf", "NIFTYBEES")
+    etf = "" if a.no_etf or str(etf or "").strip().lower() in ("", "none", "false", "off") else str(etf).upper()
+    cfg = dict(cfg, nifty_etf=etf or None)
     if a.offline_index:
         idx = load_offline(a.offline_index)[0]
         idx = idx.get(NIFTY_NAME) or idx.get("^NSEI") or idx.get("NSEI") or (list(idx.values())[0] if len(idx) == 1 else None)
@@ -1842,9 +1843,9 @@ def cmd_nifty(a):
             raise IndiaError("no NIFTY 50 chart in %s" % a.offline_index)
     else:
         idx = parse_chart(yahoo_get(NIFTY_PATH), NIFTY_NAME)
-    etf_series = load_one(etf, a.offline_etf, "60d")
+    etf_series = load_one(etf, a.offline_etf, "60d") if etf else None   # "nifty_etf": "" shows the index only
     doc = nifty_desk(idx, etf_series, cfg, now, tparam, a.replays)
-    e = doc["etf"]
+    e = doc["etf"] or {}
     if not a.no_write:
         write_json(path("nifty.json"), doc)
         if e.get("order"):   # the ETF trade, in the files the ticket, broker and dashboard read
@@ -1865,9 +1866,10 @@ def cmd_nifty(a):
                                                  "open": "Market open, entries allowed."}[i["phase"]]))
     for ln in _fmt_side(i, "points"):
         print(ln)
-    print("")
-    for ln in _fmt_side(e, "rupees a unit"):
-        print(ln)
+    if e:
+        print("")
+        for ln in _fmt_side(e, "rupees a unit"):
+            print(ln)
     if e.get("order"):
         o, r = e["order"], e["risk"]
         print("  Sized to your limits: %d units = %s, charges about %s, max loss at the stop %s."
@@ -1879,8 +1881,12 @@ def cmd_nifty(a):
         print("  Not sized: " + e["refused"])
     if i["phase"] != "open":
         print("Run it again after 9:35 AM IST on a trading day for a plan.")
-    print("The index is for the levels and the odds; %s is how a cash account trades them. "
-          "Matched rules and simulations, not predictions. %s" % (etf, SAFETY))
+    if etf:
+        print("The index is for the levels and the odds; %s is how a cash account trades them. "
+              "Matched rules and simulations, not predictions. %s" % (etf, SAFETY))
+    else:
+        print("Index levels and odds only: the index itself trades as futures and options, which these tools do "
+              "not size or check. Matched rules and simulations, not predictions. %s" % SAFETY)
     if not a.no_write:
         print("Wrote %s. The dashboard shows it: dashboard.py --market india." % path("nifty.json"))
     return 0
@@ -2594,6 +2600,7 @@ def main(argv=None):
     base(p)
     p.add_argument("--target", default="2R", help="the target as a multiple of the risk (2R)")
     p.add_argument("--etf", help="the fund that follows the Nifty (config nifty_etf, NIFTYBEES)")
+    p.add_argument("--no-etf", action="store_true", help="the index only (or set \"nifty_etf\": \"\" in the config)")
     p.add_argument("--replays", type=int, default=10000)
     p.add_argument("--offline-index", metavar="FILE", help="a saved 60-day 5-minute NIFTY 50 chart")
     p.add_argument("--offline-etf", metavar="PATH", help="a saved 60-day 5-minute chart of the fund")
